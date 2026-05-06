@@ -11,14 +11,17 @@ class AiClient:
         )
 
     async def chat(self, messages: list):
-        message = await self.aiClient.messages.create(
-            model="MiniMax-M2.7",
-            max_tokens=1000,
-            system="You are a helpful assistant.",
-            messages=messages
-        )
+        try:
+            message = await self.aiClient.messages.create(
+                model="MiniMax-M2.7",
+                max_tokens=1000,
+                messages=messages
+            )
 
-        for block in message.content:
-            if block.type == "text":
-                return block.text
-        return "No text response."
+            for block in message.content:
+                if block.type == "text":
+                    return block.text
+            return "No text response."
+        except Exception as e:
+            print(f"[AiClient Error] {type(e).__name__}: {e}")
+            raise
