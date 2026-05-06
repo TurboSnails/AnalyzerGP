@@ -15,7 +15,10 @@ aiClient = AiClient(ai_api_key=OPENAI_API_KEY)
 # 全局变量（先用最简单方式）
 MAX_HISTORY = 6
 user_sessions = {}
-
+SYSTEM_PROMPT = {
+    "role": "user",
+    "content": "你是一个专业的Android开发助手，回答要简洁、准确"
+}
 
 @router.post("/chat")
 async def chat(req: ChatRequest):
@@ -33,13 +36,9 @@ async def chat(req: ChatRequest):
     history[:] = history[-MAX_HISTORY:]
 
     # MiniMax API 不支持 system role，把 system prompt 拼到首条 user 消息
-    SYSTEM_CONTENT = "你是一个专业的Android开发助手，回答要简洁、准确"
-    if history and history[0]["role"] == "user":
-        history[0]["content"] = f"{SYSTEM_CONTENT}\n\n{history[0]['content']}"
-    else:
-        history.insert(0, {"role": "user", "content": SYSTEM_CONTENT})
+    message = [SYSTEM_PROMPT] + history[:]
 
-    reply = await aiClient.chat(history)
+    reply = await aiClient.chat(message)
 
     history.append({"role":"assistant",
                          "content": reply})
