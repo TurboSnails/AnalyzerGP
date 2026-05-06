@@ -65,3 +65,49 @@ class AiClient:
             {"role": "user", "content": str(history)}
         ]
         return await self.chat(prompt, use_tools=False)
+
+    async def run_agent(self, messages: list) -> str:
+        MAX_STEPS = 10
+
+        for step in range(MAX_STEPS):
+            response = self.client.chat.completions.create(
+                model="MiniMax-M2.7",
+                messages=messages,
+                tools=aiTools,
+            )
+
+            msg = response.choices[0].message
+            tool_calls = getattr(msg, "tool_calls", None)
+
+            if not tool_calls:
+                return msg.content or ""
+
+            print(f"[Agent] Step {step + 1}, tool_calls: {len(tool_calls)}")
+
+            tool_results = []
+            for tool_call in tool_calls:
+                func_name = tool_call.function.name
+                func_args = json.loads(tool_call.function.arguments)
+
+                try:
+                    if func_name in TOOL_FUNCTIONS:
+                        result = TOOL_FUNCTIONS[func_name](**func_args)
+                    else:
+                        result = f"Unknown tool: {func_name}"
+                except Exception as e:
+                    result = f"Error: {str(e)}"
+
+                print(f"[Tool] {func_name}({func_args}) = {result}")
+
+                tool_results.append(
+                    {
+                        "tool_call_id": tool_call.id,
+                        "role": "tool",
+                        "content": str(result),
+                    }
+                )
+
+            messages.append(msg.model_dump())
+            messages.extend(tool_results)
+
+        return "Agent stopped: max steps reached"
