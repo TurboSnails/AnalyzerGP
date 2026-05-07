@@ -15,9 +15,15 @@ from ai_app1.service.session import (
 
 router = APIRouter()
 
+# 模块级单例，整个进程共享一个实例
+_ai_client: AiClient | None = None
 
-def get_ai_client():
-    return AiClient(ai_api_key=OPENAI_API_KEY)
+
+def get_ai_client() -> AiClient:
+    global _ai_client
+    if _ai_client is None:
+        _ai_client = AiClient(ai_api_key=OPENAI_API_KEY)
+    return _ai_client
 
 
 class ChatRequest(BaseModel):
@@ -31,13 +37,11 @@ async def chat(req: ChatRequest, ai_client: AiClient = Depends(get_ai_client)):
     session = get_session(user_id)
     add_user_message(session, req.message)
 
-    # 先攒着，等 AI 处理完再 summarize——避免 AI 还没看就被压缩
     messages = build_messages(session)
     reply = await ai_client.run_agent(messages)
 
     add_assistant_message(session, reply)
 
-    # AI 回复后再判断是否需要 summarize
     if should_summarize(session):
         summary = await ai_client.summarize(session["history"])
         update_summary(session, summary)
