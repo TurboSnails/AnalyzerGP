@@ -37,7 +37,7 @@ async def chat(req: ChatRequest, ai_client: AiClient = Depends(get_ai_client)):
     session = get_session(user_id)
     add_user_message(session, req.message)
 
-    messages = build_messages(session)
+    messages = build_messages(session,req.message)
     reply = await ai_client.run_agent(messages)
 
     add_assistant_message(session, reply)
