@@ -151,6 +151,7 @@ def build_messages(session: SessionData, req_msg: str) -> list:
         })
 
     context = query_db(req_msg)
+    print(f"---------------->query_db:${context}")
     if context:
         messages.append({"role": "user", "content": f"参考资料：{context}"})
         session_logger.info(f"追加参考资料: {context[:50]}...")
