@@ -10,7 +10,7 @@
 from typing import TypedDict
 
 from ai_app1.core.logger import session_logger, retrieve_doc_logger
-
+from ai_app1.service.vector_store import query_db
 
 class SessionData(TypedDict):
     """会话数据结构，所有字段均为进程内内存存储"""
@@ -150,7 +150,7 @@ def build_messages(session: SessionData, req_msg: str) -> list:
             "content": "【注意】对话即将超出上下文限制，请先简洁总结之前的关键信息，再继续回答。"
         })
 
-    context = retrieve_doc(req_msg)
+    context = query_db(req_msg)
     if context:
         messages.append({"role": "user", "content": f"参考资料：{context}"})
         session_logger.info(f"追加参考资料: {context[:50]}...")
