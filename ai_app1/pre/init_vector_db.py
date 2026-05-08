@@ -1,6 +1,7 @@
 import chromadb
+from ai_app1.core.config import CHROMA_DB_PATH
 
-client = chromadb.PersistentClient(path="/Users/hassan/Documents/workspace/aiFile/fenxiCB/ai_app1/pre/chroma_db")
+client = chromadb.PersistentClient(path=CHROMA_DB_PATH)
 
 collection = client.get_or_create_collection(name="android_docs")
 
