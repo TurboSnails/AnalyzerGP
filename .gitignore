@@ -9,3 +9,5 @@ __pycache__/
 venv/
 ENV/
 env/
+/ai_app1/pre/chroma_db/
+/pre/chroma_db/chroma.sqlite3
