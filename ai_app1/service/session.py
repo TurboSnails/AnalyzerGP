@@ -5,11 +5,10 @@
 - 每个 user_id 对应一个 SessionData（内存字典，进程重启后丢失）
 - history 仅保留最近 MAX_HISTORY 条，超出部分裁剪到 trimmed（防止丢失）
 - token 预算耗尽时触发 summarize，将历史压缩为 summary 供后续上下文复用
-- retrieve_doc 解析 docs.txt，根据用户 query 匹配错误类型并返回解答
 """
 from typing import TypedDict
 
-from ai_app1.core.logger import session_logger, retrieve_doc_logger
+from ai_app1.core.logger import session_logger
 from ai_app1.service.vector_store import query_db
 
 class SessionData(TypedDict):
@@ -135,7 +134,7 @@ def build_messages(session: SessionData, req_msg: str) -> list:
     """
     构建完整的发送给 run_agent 的 messages 列表。
 
-    包含：raw messages + 压缩提示（若 token 超预算）+ docs.txt 检索结果
+    包含：raw messages + 压缩提示（若 token 超预算）+ 向量库检索结果
 
     Args:
         session: 当前会话
@@ -161,62 +160,3 @@ def build_messages(session: SessionData, req_msg: str) -> list:
     session_logger.info(f"构建最终 messages: {len(messages)} 条")
     return messages
 
-
-def retrieve_doc(query: str):
-    """
-    从 docs.txt 检索与 query 相关的错误解答。
-
-    docs.txt 格式（以空行分隔条目）：
-        1. NullPointerException：空指针
-        解决：检查对象是否初始化
-
-    Args:
-        query: 用户输入的原始消息
-
-    Returns:
-        匹配到的错误解答；若未命中则返回 None
-    """
-    retrieve_doc_logger.debug(f"检索文档: query={query}")
-
-    # 动态计算 docs.txt 路径（相对于 session.py 所在目录）
-    import os
-    import re
-    docs_path = os.path.join(os.path.dirname(__file__), "..", "docs.txt")
-    if not os.path.exists(docs_path):
-        retrieve_doc_logger.warning(f"docs.txt 不存在: {docs_path}")
-        return None
-
-    with open(docs_path, "r", encoding="utf-8") as f:
-        content = f.read()
-
-    # 解析：按空行分块，每块第一行匹配 "序号. 错误名：描述"，
-    # 紧随的 "解决：" 行作为解答，同时建立大小写不敏感的 key
-    entries = {}
-    blocks = re.split(r"\n\s*\n", content.strip())
-
-    for block in blocks:
-        lines = block.strip().splitlines()
-        for i, line in enumerate(lines):
-            m = re.match(r"^\d+\.\s*(.+?)：(.*)$", line)
-            if m:
-                error_name = m.group(1).strip()
-                error_desc = m.group(2).strip()
-                # 向下查找 "解决：" 开头的行
-                solution = ""
-                for j in range(i + 1, len(lines)):
-                    sol_line = lines[j].strip()
-                    if sol_line.startswith("解决："):
-                        solution = sol_line.replace("解决：", "").strip()
-                        break
-                if solution:
-                    entries[error_name] = f"{error_desc}。{solution}"
-                    entries[error_name.lower()] = f"{error_desc}。{solution}"
-
-    query_lower = query.lower()
-    for error_name, answer in entries.items():
-        if error_name in query_lower or error_name in query:
-            retrieve_doc_logger.info(f"命中文档条目: error_name={error_name}")
-            return answer
-
-    retrieve_doc_logger.debug(f"未命中任何文档条目")
-    return None

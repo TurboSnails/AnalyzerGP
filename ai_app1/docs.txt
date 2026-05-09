@@ -1,6 +1,0 @@
-Android 常见错误：
-1. NullPointerException：空指针
-解决：检查对象是否初始化
-
-2. IndexOutOfBoundsException：数组越界
-解决：检查下标范围

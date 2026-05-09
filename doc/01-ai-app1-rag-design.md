@@ -90,9 +90,11 @@ ai_app1 是一个面向 Android 开发者的 **智能问答助手**，基于 RAG
 
 | 路径 | 数据源 | 粒度 | 作用 |
 |------|--------|------|------|
-| Dense | `android_child` (128字 child chunks) | 细粒度语义匹配 | 捕获 query 与文档的语义相似性 |
-| HyDE | `android_hyde` (LLM 生成假设问题) | 问题→问题匹配 | 解决 query 与文档表述不一致问题 |
-| BM25 | `android_parent` (全文倒排索引) | 关键词精确匹配 | 捕获专有名词、技术术语 |
+| Dense | `android_child` → 回溯 `android_parent` | 细粒度语义匹配 | child 做 128 字向量检索，通过 `parent_id` 回溯取 512 字完整 parent 文本 |
+| HyDE | `android_hyde` → 回溯 `android_parent` | 问题→问题匹配 | 假设问题向量匹配，通过 `parent_id` 回溯取完整 parent 文本 |
+| BM25 | `android_parent` (全文倒排索引) | 关键词精确匹配 | 直接检索 512 字 parent，捕获专有名词、技术术语 |
+
+> **父子回溯机制**：Dense 与 HyDE 两路均先在小粒度 collection（`android_child` / `android_hyde`）中做向量相似度检索，从命中结果的 `metadata.parent_id` 字段聚合去重，再按子文档的最小距离对父文档排序，最终拉取 `android_parent` 中的完整文本作为上下文。该设计的收益是：细粒度检索提升语义匹配精度，大粒度 parent 保证 LLM 获得完整、连贯的参考内容。
 
 #### 3.1.2 RRF 融合 (Reciprocal Rank Fusion)
 

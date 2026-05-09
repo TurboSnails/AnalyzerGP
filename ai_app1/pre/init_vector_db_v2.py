@@ -137,7 +137,7 @@ def generate_hyde_questions(client: openai.OpenAI, chunk: str, parent_id: str, r
 
 if __name__ == "__main__":
     # 1. 读取源文件
-    src = os.path.join(os.path.dirname(__file__), "..", "Android 开发核心注意事项与避坑指南")
+    src = os.path.join(os.path.dirname(__file__), "..", "data", "Android 开发核心注意事项与避坑指南")
     with open(src, "r", encoding="utf-8") as f:
         content = f.read()
     logger.info(f"源文件加载: {len(content)} 字符")

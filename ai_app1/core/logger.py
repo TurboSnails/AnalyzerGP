@@ -18,7 +18,6 @@ logging.basicConfig(
 ai_client_logger = logging.getLogger("ai_client")
 session_logger = logging.getLogger("session")
 chat_logger = logging.getLogger("chat")
-retrieve_doc_logger = logging.getLogger("retrieve_doc")
 
 # Phase 1-3 新增模块 logger
 vector_store_logger = logging.getLogger("vector_store")

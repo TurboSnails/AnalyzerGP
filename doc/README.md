@@ -33,8 +33,8 @@ AnalyzerGP/
 ├── ai_app1/                     # Android RAG 问答服务
 │   ├── main.py                  # FastAPI 入口
 │   ├── .env                     # 环境变量 (API Key)
-│   ├── Android 开发核心注意事项与避坑指南   # 源知识文档
-│   ├── docs.txt                 # 旧版错误索引 (兼容)
+│   ├── data/
+│   │   └── Android 开发核心注意事项与避坑指南   # 源知识文档
 │   ├── api/
 │   │   └── chat.py              # /chat POST 路由
 │   ├── core/
