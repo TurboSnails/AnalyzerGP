@@ -21,12 +21,15 @@ from ai_app1.core.config import CHROMA_DB_PATH
 logger = logging.getLogger("vector_store")
 
 # ─── 超参数 ───────────────────────────────────────────────────────────────────
-MAX_DISTANCE = 1.2   # 旧版单路检索阈值
-RRF_K = 60           # RRF 常数（越大越平滑排名差异）
-DENSE_TOP_K = 10     # 向量检索 child 返回数
-HYDE_TOP_K = 5       # HyDE 问题匹配数
-BM25_TOP_K = 10      # BM25 返回数
-RERANK_TOP_K = 5     # 最终喂给 LLM 的片段数
+MAX_DISTANCE = 1.2       # 旧版单路检索阈值
+MAX_CHILD_DISTANCE = 1.3 # child 层面向量距离阈值
+RRF_K = 60               # RRF 常数（越大越平滑排名差异）
+DENSE_QUERY_K = 25       # child 查询量（去重/聚合后保留 DENSE_TOP_K）
+DENSE_TOP_K = 10         # 向量检索最终 parent 返回数
+HYDE_QUERY_K = 15        # HyDE 查询量
+HYDE_TOP_K = 5           # HyDE 最终 parent 返回数
+BM25_TOP_K = 10          # BM25 返回数
+RERANK_TOP_K = 5         # 最终喂给 LLM 的片段数
 
 _client: chromadb.PersistentClient | None = None
 
@@ -61,40 +64,74 @@ def _rrf_merge(ranked_lists: list[list[str]]) -> list[tuple[str, float]]:
 
 # ─── 各检索路 ──────────────────────────────────────────────────────────────────
 
+def _aggregate_parent_hits(metas, distances, max_dist: float, top_k: int):
+    """按 parent_id 聚合 child/hyde 命中结果，返回排序后的 parent_id 列表。
+
+    策略：
+      1. 过滤 distance > max_dist 的噪声
+      2. 同一 parent 下收集所有命中 child 的 distance
+      3. parent 级得分 = min(distance) - 0.05 * (hit_count - 1)
+         （命中次数越多，轻微提升排序）
+      4. 按得分升序返回 top_k 个 parent_id
+    """
+    parent_hits: dict[str, list[float]] = {}
+    for meta, dist in zip(metas, distances):
+        if dist > max_dist:
+            continue
+        pid = meta["parent_id"]
+        parent_hits.setdefault(pid, []).append(dist)
+
+    scored = []
+    for pid, dists in parent_hits.items():
+        min_dist = min(dists)
+        hit_count = len(dists)
+        score = min_dist - 0.05 * (hit_count - 1)
+        scored.append((pid, score, min_dist, hit_count))
+
+    scored.sort(key=lambda x: x[1])
+    pids = [s[0] for s in scored[:top_k]]
+    return pids, scored[:top_k] if scored else []
+
+
 def _query_dense(query: str, col_child) -> list[str]:
-    """路A：向量检索 child → 去重 parent_id，按 distance 升序"""
-    result = col_child.query(query_texts=[query], n_results=DENSE_TOP_K)
+    """路A：向量检索 child → 聚合 parent_id，按多命中加权 distance 升序"""
+    result = col_child.query(query_texts=[query], n_results=DENSE_QUERY_K)
     metas = result["metadatas"][0]
     distances = result["distances"][0]
 
-    seen: dict[str, float] = {}
-    for meta, dist in zip(metas, distances):
-        pid = meta["parent_id"]
-        if pid not in seen:
-            seen[pid] = dist
+    pids, top_scored = _aggregate_parent_hits(
+        metas, distances, MAX_CHILD_DISTANCE, DENSE_TOP_K
+    )
 
-    ranked = sorted(seen.items(), key=lambda x: x[1])
-    pids = [p for p, _ in ranked]
-    top_dist = f"{ranked[0][1]:.3f}" if ranked else "N/A"
-    logger.debug(f"Dense 检索: {len(pids)} 个 parent_id, top_dist={top_dist}")
+    if top_scored:
+        top = top_scored[0]
+        logger.debug(
+            f"Dense 检索: {len(pids)} 个 parent, "
+            f"top_dist={top[2]:.3f} (hits={top[3]})"
+        )
+    else:
+        logger.debug("Dense 检索: 无有效结果")
     return pids
 
 
 def _query_hyde(query: str, col_hyde) -> list[str]:
-    """路B：向量检索 HyDE 假设问题 → 去重 parent_id，按 distance 升序"""
-    result = col_hyde.query(query_texts=[query], n_results=HYDE_TOP_K)
+    """路B：向量检索 HyDE 假设问题 → 聚合 parent_id，按多命中加权 distance 升序"""
+    result = col_hyde.query(query_texts=[query], n_results=HYDE_QUERY_K)
     metas = result["metadatas"][0]
     distances = result["distances"][0]
 
-    seen: dict[str, float] = {}
-    for meta, dist in zip(metas, distances):
-        pid = meta["parent_id"]
-        if pid not in seen:
-            seen[pid] = dist
+    pids, top_scored = _aggregate_parent_hits(
+        metas, distances, MAX_CHILD_DISTANCE, HYDE_TOP_K
+    )
 
-    ranked = sorted(seen.items(), key=lambda x: x[1])
-    pids = [p for p, _ in ranked]
-    logger.debug(f"HyDE 检索: {len(pids)} 个 parent_id")
+    if top_scored:
+        top = top_scored[0]
+        logger.debug(
+            f"HyDE 检索: {len(pids)} 个 parent, "
+            f"top_dist={top[2]:.3f} (hits={top[3]})"
+        )
+    else:
+        logger.debug("HyDE 检索: 无有效结果")
     return pids
 
 
@@ -180,6 +217,9 @@ def query_db(query: str) -> str | None:
 
     # ── Rerank ────────────────────────────────────────────────────────────────
     reranked = rerank_chunks(query, candidates, top_k=RERANK_TOP_K)
+    # 强制断言：Rerank 后不允许存在重复的 parent_id（避免上下文污染）
+    _rerank_ids = [r["id"] for r in reranked]
+    assert len(_rerank_ids) == len(set(_rerank_ids)),         f"Rerank 输出存在重复 parent_id: {_rerank_ids}"
     for r in reranked:
         logger.info(
             f"  [{r['id']}] final={r['final_score']:.3f} "

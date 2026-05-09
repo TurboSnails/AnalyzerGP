@@ -5,7 +5,7 @@ AiClient：封装与 MiniMax-M2.7 模型的交互逻辑。
 - chat(messages, use_tools=False)：普通对话，返回文本
 - run_agent(messages)：工具增强对话，内部自动处理工具调用循环
 
-内部使用 openai.OpenAI SDK，通过 base_url 指向 MiniMax 兼容端点。
+内部使用 openai.AsyncOpenAI SDK，通过 base_url 指向 MiniMax 兼容端点。
 每次请求不会重新创建客户端（AiClient 单例由 chat.py 管理）。
 """
 import json
@@ -23,12 +23,12 @@ class AiClient:
 
     Attributes:
         ai_api_key: API 密钥（初始化时脱敏，仅显示前 8 位）
-        client: openai.OpenAI 实例，复用 HTTP 连接池
+        client: openai.AsyncOpenAI 实例，复用 HTTP 连接池
     """
 
     def __init__(self, ai_api_key: str):
         self.ai_api_key = ai_api_key[:8] + "****"  # 脱敏日志输出
-        self.client = openai.OpenAI(
+        self.client = openai.AsyncOpenAI(
             base_url="https://api.minimaxi.com/v1",
             api_key=ai_api_key
         )
@@ -67,7 +67,7 @@ class AiClient:
                 ai_client_logger.debug(f"[{step_id}] 启用 tools，tools 数量: {len(aiTools)}")
 
             # 首轮请求
-            response = self.client.chat.completions.create(**kwargs)
+            response = await self.client.chat.completions.create(**kwargs)
             response_message = response.choices[0].message
             ai_client_logger.debug(
                 f"[{step_id}] 首轮响应: content_len={len(response_message.content or '')}, "
@@ -114,7 +114,7 @@ class AiClient:
             messages.extend(tool_results)
             ai_client_logger.debug(f"[{step_id}] 工具结果追加: {len(tool_results)} 条")
 
-            response = self.client.chat.completions.create(
+            response = await self.client.chat.completions.create(
                 model="MiniMax-M2.7",
                 messages=messages
             )
@@ -145,9 +145,13 @@ class AiClient:
         ai_client_logger.debug(f"summarize 调用: history_len={len(history)}")
         start = time.monotonic()
 
+        history_text = "\n".join(
+            f"{m.get('role', 'unknown')}: {m.get('content', '')}"
+            for m in history
+        )
         prompt = [
             {"role": "user", "content": "请总结以下对话的关键信息，用于后续对话参考"},
-            {"role": "user", "content": str(history)}
+            {"role": "user", "content": history_text}
         ]
 
         result = await self.chat(prompt, use_tools=False)
@@ -181,7 +185,7 @@ class AiClient:
             ai_client_logger.debug(f"[{run_id}] Step {step + 1}/{MAX_STEPS}: 发送请求")
             start = time.monotonic()
 
-            response = self.client.chat.completions.create(
+            response = await self.client.chat.completions.create(
                 model="MiniMax-M2.7",
                 messages=messages,
                 tools=aiTools,

@@ -3,7 +3,10 @@
 
 rerank_chunks:
     基于多维度线性组合对候选 parent 片段重排：
-    RRF 分（0.45）+ 词项覆盖率（0.30）+ 向量排名倒数（0.15）+ BM25 排名倒数（0.10）
+    1. 归一化 RRF 分：normalized_rrf = rrf_score / max_rrf（使量级统一至 0~1）
+    2. 加权组合：0.45 * normalized_rrf + 0.30 * term_overlap
+                  + 0.15 * vector_inv + 0.10 * bm25_inv
+    3. 取 Top-K
 
 reorder_lost_in_middle:
     按"Lost in the Middle"理论重排上下文顺序：
@@ -44,12 +47,17 @@ def rerank_chunks(query: str, candidates: list[dict], top_k: int = 5) -> list[di
     """
     q_tokens = _tokenize(query)
 
+    # 归一化 RRF 分数：rrf_score 原始范围约 0~0.05，与 term_overlap (0~1) 量级不统一
+    max_rrf = max(c.get("rrf_score", 0.0) for c in candidates) or 1.0
+
     for c in candidates:
         term_score = _term_overlap(q_tokens, c["text"])
+        # vector_inv / bm25_inv 天然处于 0~1 区间，无需额外归一化
         vector_inv = 1.0 / (1 + c.get("vector_rank", 999))
         bm25_inv = 1.0 / (1 + c.get("bm25_rank", 999))
+        normalized_rrf = c.get("rrf_score", 0.0) / max_rrf
         c["final_score"] = (
-            0.45 * c.get("rrf_score", 0.0)
+            0.45 * normalized_rrf
             + 0.30 * term_score
             + 0.15 * vector_inv
             + 0.10 * bm25_inv

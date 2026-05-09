@@ -14,6 +14,7 @@ Phase 1 验收测试：验证 Parent-Child + HyDE 索引是否正确构建
 import sys
 import logging
 import chromadb
+from ai_app1.core.config import CHROMA_DB_PATH
 
 logging.basicConfig(
     level=logging.INFO,
@@ -21,8 +22,6 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 logger = logging.getLogger("verify_p1")
-
-CHROMA_DB_PATH = "/Users/hassan/Documents/workspace/aiFile/fenxiCB/ai_app1/pre/chroma_db"
 PASS = "✅ PASS"
 FAIL = "❌ FAIL"
 

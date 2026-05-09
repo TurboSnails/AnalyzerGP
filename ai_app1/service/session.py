@@ -68,12 +68,19 @@ def estimate_tokens(messages: list) -> int:
     """
     估算一组消息的 token 总数。
 
-    采用字符数 / 4 的粗略估算（中文语境下误差可接受），
-    优于每次都调用 tiktoken（增加依赖和耗时）。
+    改进策略（应对 Android 开发场景的中英文混合）：
+      - 中文字符（含全角标点）：~1.5 token/字
+      - 英文/数字/代码符号/半角标点：~0.5 token/字符
+    优于单纯 "字符数/4"（后者对中文严重低估，会导致过早触发 summarize）。
     """
-    tokens = sum(len(m.get("content", "")) // 4 for m in messages)
-    session_logger.debug(f"预估 token 数: {tokens}")
-    return tokens
+    total = 0
+    for m in messages:
+        text = m.get("content", "")
+        cn_chars = len(re.findall(r"[一-鿿　-〿＀-￯]", text))
+        other_chars = len(text) - cn_chars
+        total += int(cn_chars * 1.5 + other_chars * 0.5)
+    session_logger.debug(f"预估 token 数: {total}")
+    return total
 
 
 def should_summarize(session: SessionData) -> bool:
