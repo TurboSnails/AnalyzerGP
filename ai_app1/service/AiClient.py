@@ -12,7 +12,7 @@ import json
 import logging
 import time
 import openai
-from ai_app1.service.multiply import aiTools, TOOL_FUNCTIONS
+from ai_app1.service.tools import aiTools, TOOL_FUNCTIONS
 
 ai_client_logger = logging.getLogger("ai_client")
 
