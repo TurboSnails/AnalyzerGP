@@ -332,7 +332,7 @@
 <!-- Config bar -->
 <div class="config-bar">
   <label>API</label>
-  <input type="text" id="apiUrl" value="http://localhost:8000" spellcheck="false" autocomplete="off" />
+  <input type="text" id="apiUrl" value="" placeholder="空则用当前页 origin（勿混 localhost / 127.0.0.1）" spellcheck="false" autocomplete="off" />
   <div class="status-dot" id="statusDot"></div>
   <span class="status-text" id="statusText">未连接</span>
 </div>
@@ -364,6 +364,13 @@
   const apiUrlEl  = document.getElementById('apiUrl');
   const statusDot = document.getElementById('statusDot');
   const statusTxt = document.getElementById('statusText');
+
+  // 与页面同源：避免 http://127.0.0.1:8000 打开却请求 http://localhost:8000 → 触发 CORS/OPTIONS
+  if (apiUrlEl && !apiUrlEl.value.trim()) {
+    const proto = window.location.protocol;
+    apiUrlEl.value =
+      proto === 'http:' || proto === 'https:' ? window.location.origin : 'http://127.0.0.1:8000';
+  }
 
   let isSending = false;
 
@@ -495,7 +502,14 @@
     const metricsBar = aiRow.querySelector('#metricsBar');
     const ttftLive = aiRow.querySelector('#ttftLive');
 
-    const apiUrl = apiUrlEl.value.trim().replace(/\/$/, '');
+    let apiUrl = apiUrlEl.value.trim().replace(/\/$/, '');
+    if (!apiUrl) {
+      const proto = window.location.protocol;
+      apiUrl =
+        proto === 'http:' || proto === 'https:'
+          ? window.location.origin.replace(/\/$/, '')
+          : 'http://127.0.0.1:8000';
+    }
     setStatus('loading', '请求中…');
 
     const sendTime = performance.now();

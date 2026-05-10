@@ -9,7 +9,8 @@
 
 环境变量：
   HF_TOKEN、HF_ENDPOINT、HF_MAX_WORKERS、HF_HUB_ETAG_TIMEOUT、HF_DISK_STATS_INTERVAL、HF_DOWNLOAD_UNLOCK
-  见 hf_snapshot_downloader.py 顶部说明。
+  未设 HF_TOKEN 时脚本默认匿名（不用本机过期 token）。要隐式用已 login token：HF_IMPLICIT_TOKEN=1
+  HF_TOKEN=具体值 / false / 空：见 hf_snapshot_downloader。
 
 默认（未设置 HF_ENDPOINT）使用大陆镜像 hf-mirror；要直连官方 Hub：加 --no-mirror。
 
@@ -30,7 +31,8 @@ from dotenv import load_dotenv
 
 from hf_snapshot_downloader import DEFAULT_CN_MIRROR, HfSnapshotDownloader, PRESETS
 
-load_dotenv()
+# override=True：否则 IDE/Shell 里已存在的 HF_TOKEN 会挡住 ai_app1/.env 里的 HF_TOKEN=false
+load_dotenv(Path(__file__).resolve().parent.parent / ".env", override=True)
 
 
 def main() -> None:

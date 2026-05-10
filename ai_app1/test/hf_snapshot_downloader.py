@@ -97,6 +97,22 @@ def _float_env(name: str, default: float) -> float:
         return default
 
 
+def _hf_token_for_snapshot() -> str | bool | None:
+    """
+    传给 snapshot_download 的 token。
+    未设 HF_TOKEN 时默认 False（不附带本机缓存 token；避免过期 token 打镜像 401）。
+    需要 hf auth login 的隐式 token：HF_IMPLICIT_TOKEN=1。
+    """
+    raw = os.getenv("HF_TOKEN")
+    if raw is None:
+        implicit = os.getenv("HF_IMPLICIT_TOKEN", "").strip().lower() in ("1", "true", "yes", "on")
+        return None if implicit else False
+    s = raw.strip()
+    if not s or s.lower() in ("false", "0", "no", "anonymous", "none"):
+        return False
+    return s
+
+
 class _LiveHubTqdm(HfTqdm):
     """缩短 tqdm 刷新间隔，弱网下避免长时间 0% 像卡死。"""
 
@@ -280,7 +296,7 @@ class HfSnapshotDownloader:
             max_workers=workers,
             ignore_patterns=self._ignore_for_slim(slim),
             etag_timeout=etag_timeout,
-            token=os.getenv("HF_TOKEN") or None,
+            token=_hf_token_for_snapshot(),
             tqdm_class=_LiveHubTqdm,
             force_download=force,
         )
