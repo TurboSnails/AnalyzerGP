@@ -67,3 +67,4 @@ env/
 /ai_app1/models/bge-m3/tokenizer_config.json
 /models/bge-m3/onnx/tokenizer_config.json
 /models/bge-m3/tokenizer_config.json
+/ai_app1/models/bge-m3/
