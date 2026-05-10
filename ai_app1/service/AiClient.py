@@ -34,6 +34,126 @@ class AiClient:
         )
         ai_client_logger.info(f"AiClient 初始化: base_url=https://api.minimaxi.com/v1")
 
+    # ─── 流式对话 ───────────────────────────────────────────────
+
+    async def _stream_response(self, messages: list, use_tools: bool = False):
+        """
+        通用的流式响应处理逻辑，提取公共逻辑供 chat / run_agent 系列方法复用。
+        当 use_tools=True 且模型返回 tool_calls 时，切换为非流式完整收集再响应。
+        """
+        kwargs = {
+            "model": "MiniMax-M2.7",
+            "messages": messages,
+            "stream": True,
+        }
+        if use_tools:
+            kwargs["tools"] = aiTools
+
+        response = await self.client.chat.completions.create(**kwargs)
+
+        if use_tools:
+            # 工具模式：先完整收集 tool_calls，再非流式执行工具，最后继续流式响应
+            full = ""
+            async for chunk in response:
+                delta = chunk.choices[0].delta
+                if delta.content:
+                    full += delta.content
+            msg_content = full
+
+            if not msg_content:
+                return
+
+            response_message = type("obj", (object,), {
+                "content": msg_content,
+                "tool_calls": None
+            })()
+
+            if not response_message.tool_calls:
+                yield msg_content
+                return
+
+            tool_results = []
+            for tool_call in response_message.tool_calls:
+                func_name = tool_call.function.name
+                func_args = json.loads(tool_call.function.arguments)
+                try:
+                    result = TOOL_FUNCTIONS[func_name](**func_args) if func_name in TOOL_FUNCTIONS else f"Unknown tool: {func_name}"
+                except Exception as e:
+                    result = f"Error: {str(e)}"
+                tool_results.append({
+                    "tool_call_id": tool_call.id,
+                    "role": "tool",
+                    "content": str(result)
+                })
+
+            messages.append(response_message.model_dump() if hasattr(response_message, "model_dump") else {"role": "assistant", "content": msg_content})
+            messages.extend(tool_results)
+
+            async for chunk in self._stream_response(messages, use_tools=False):
+                yield chunk
+            return
+
+        async for chunk in response:
+            delta = chunk.choices[0].delta
+            if delta.content:
+                yield delta.content
+
+    async def stream_chat(self, messages: list, use_tools: bool = False):
+        """
+        流式发起一次对话请求，yield 每个 token chunk。
+
+        工具调用场景会先完整收集 tool_calls，再执行工具，最后继续流式返回最终响应。
+        """
+        async for token in self._stream_response(messages, use_tools):
+            yield token
+
+    async def stream_run_agent(self, messages: list):
+        """
+        流式工具增强型对话入口，内部自动处理多轮工具调用循环。
+        每轮 tool_calls 执行后继续流式输出，最终返回所有 token chunks。
+        """
+        MAX_STEPS = 10
+
+        for step in range(MAX_STEPS):
+            full = ""
+            async for token in self._stream_response(messages, use_tools=True):
+                full += token
+                yield token
+
+            if not full:
+                break
+
+            # 检查是否有新的 tool_calls
+            response = await self.client.chat.completions.create(
+                model="MiniMax-M2.7",
+                messages=messages,
+                tools=aiTools,
+            )
+            msg = response.choices[0].message
+            tool_calls = getattr(msg, "tool_calls", None)
+
+            if not tool_calls:
+                break
+
+            tool_results = []
+            for tool_call in tool_calls:
+                func_name = tool_call.function.name
+                func_args = json.loads(tool_call.function.arguments)
+                try:
+                    result = TOOL_FUNCTIONS[func_name](**func_args) if func_name in TOOL_FUNCTIONS else f"Unknown tool: {func_name}"
+                except Exception as e:
+                    result = f"Error: {str(e)}"
+                tool_results.append({
+                    "tool_call_id": tool_call.id,
+                    "role": "tool",
+                    "content": str(result)
+                })
+
+            messages.append(msg.model_dump())
+            messages.extend(tool_results)
+
+    # ─── 非流式对话（兼容保留） ─────────────────────────────────
+
     async def chat(self, messages: list, use_tools: bool = False) -> str:
         """
         发起一次对话请求（同步工具调用后的最终响应）。

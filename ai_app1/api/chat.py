@@ -13,6 +13,7 @@ AiClient 使用进程级单例，避免重复创建 OpenAI 客户端实例。
 """
 import time
 from fastapi import APIRouter, Depends
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from ai_app1.core.config import OPENAI_API_KEY
@@ -56,14 +57,14 @@ class ChatRequest(BaseModel):
 @router.post("/chat")
 async def chat(req: ChatRequest, ai_client: AiClient = Depends(get_ai_client)):
     """
-    处理用户聊天请求的主入口。
+    处理用户聊天请求的主入口。流式响应，用户首个 token 即可见。
 
     Args:
         req: 包含 message 字段的请求体
         ai_client: 通过 Depends 注入的 AiClient 单例
 
     Returns:
-        {"reply": AI 回复内容}
+        StreamingResponse 流式输出 AI 回复
     """
     req_id = id(req)
     chat_logger.info(f"[{req_id}] 收到请求: message={req.message[:50]!r}")
@@ -75,7 +76,7 @@ async def chat(req: ChatRequest, ai_client: AiClient = Depends(get_ai_client)):
     session = get_session(user_id)
     chat_logger.debug(f"[{req_id}] 获取 session: history_len={len(session['history'])}, summary={'有' if session['summary'] else '无'}")
 
-    # 1. 用户消息入栈（此时 AI 还未处理，不触发 summarize）
+    # 1. 用户消息入栈
     add_user_message(session, req.message)
     chat_logger.debug(f"[{req_id}] 用户消息已添加: history_len={len(session['history'])}")
 
@@ -83,27 +84,33 @@ async def chat(req: ChatRequest, ai_client: AiClient = Depends(get_ai_client)):
     messages = build_messages(session, req.message)
     chat_logger.debug(f"[{req_id}] messages 构建完成: {len(messages)} 条")
 
-    # 3. 调用 AI（内部处理工具调用循环）
-    reply = await ai_client.run_agent(messages)
-    chat_logger.info(f"[{req_id}] AI 回复生成: reply_len={len(reply)}, 耗时={time.monotonic() - start:.2f}s")
+    # 3. 流式收集完整回复（用于 summarize 判断），同时流式 yield 给客户端
+    full_reply_parts: list[str] = []
 
-    # 4. AI 回复入栈后，才判断是否需要 summarize
-    add_assistant_message(session, reply)
-    chat_logger.debug(f"[{req_id}] 助手消息已添加: history_len={len(session['history'])}")
+    async def content_generator():
+        nonlocal messages
+        async for chunk in ai_client.stream_run_agent(messages):
+            if chunk:
+                full_reply_parts.append(chunk)
+                yield chunk
 
-    if should_summarize(session):
-        chat_logger.info(f"[{req_id}] 开始 summarize")
-        summary = await ai_client.summarize(session["history"])
-        update_summary(session, summary)
-        chat_logger.info(f"[{req_id}] summarize 完成: summary_len={len(summary)}")
-    else:
-        chat_logger.debug(f"[{req_id}] 跳过 summarize: should_summarize=False")
+        # 流式结束后更新 session（保证 summarize 在 AI 回复之后触发）
+        reply = "".join(full_reply_parts)
+        add_assistant_message(session, reply)
+        chat_logger.debug(f"[{req_id}] 助手消息已添加: history_len={len(session['history'])}")
 
-    # 5. 裁剪 history（发生在 AI 回复之后，不丢失本轮内容）
-    trim_history(session)
-    chat_logger.debug(f"[{req_id}] trim_history 完成: history_len={len(session['history'])}, trimmed_len={len(session['trimmed'])}")
+        if should_summarize(session):
+            chat_logger.info(f"[{req_id}] 开始 summarize")
+            summary = await ai_client.summarize(session["history"])
+            update_summary(session, summary)
+            chat_logger.info(f"[{req_id}] summarize 完成: summary_len={len(summary)}")
+        else:
+            chat_logger.debug(f"[{req_id}] 跳过 summarize: should_summarize=False")
 
-    elapsed = time.monotonic() - start
-    chat_logger.info(f"[{req_id}] 请求处理完成: 总耗时={elapsed:.2f}s")
+        trim_history(session)
+        chat_logger.debug(f"[{req_id}] trim_history 完成: history_len={len(session['history'])}, trimmed_len={len(session['trimmed'])}")
 
-    return {"reply": reply}
+        elapsed = time.monotonic() - start
+        chat_logger.info(f"[{req_id}] 请求处理完成: 总耗时={elapsed:.2f}")
+
+    return StreamingResponse(content_generator(), media_type="text/plain")
