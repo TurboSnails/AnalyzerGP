@@ -9,22 +9,24 @@ Phase 1 离线索引增强：Parent-Child 架构 + 假设性问题 (HyDE)
 运行方式:
     uv run python -m ai_app1.pre.init_vector_db_v2
 """
+import gc
 import os
 import re
+import shutil
 import time
-import logging
 import openai
 import chromadb
 from dotenv import load_dotenv
 
-load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
+try:
+    import psutil
+    _HAS_PSUTIL = True
+except ImportError:
+    _HAS_PSUTIL = False
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s - %(message)s",
-    datefmt="%H:%M:%S",
-)
-logger = logging.getLogger("init_v2")
+from ai_app1.core.logger import vector_store_logger as logger
+
+load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
 
 CHROMA_DB_PATH = "/Users/hassan/Documents/workspace/aiFile/fenxiCB/ai_app1/pre/chroma_db"
 PARENT_CHUNK_SIZE = 512
@@ -36,20 +38,26 @@ MINIMAX_API_KEY = os.getenv("OPENAI_API_KEY")
 MINIMAX_BASE_URL = "https://api.minimaxi.com/v1"
 MINIMAX_MODEL = "MiniMax-M2.7"
 
+MEM_WARN_PCT = 75   # 内存使用率超过此值时打印警告
+MEM_GC_PCT   = 85   # 超过此值时强制 gc.collect()
+MEM_ABORT_PCT = 92  # 超过此值时安全退出，避免系统 OOM
+
 
 # ─── Chunking ────────────────────────────────────────────────────────────────
 
-def chunk_text(text: str, chunk_size: int, overlap: int) -> list[str]:
-    """按段落分割，优先保持段落完整，超长则按句分割，带重叠"""
-    paragraphs = [p.strip() for p in text.split("\n") if p.strip()]
+def _chunk_paragraphs(paragraphs, chunk_size: int, overlap: int) -> list[str]:
+    """核心分块逻辑：优先保持段落边界，超长段落内部按句切分，不与其他段落混拼"""
     chunks: list[str] = []
     current = ""
 
     for para in paragraphs:
         if len(para) > chunk_size:
+            # 先 flush 当前积累的内容
             if current:
                 chunks.append(current.strip())
                 current = ""
+
+            # 超长段落独立按句切分，每个子 chunk 独立输出，不混入前后段落
             sentences = re.split(r"(?<=[。！？!?])", para)
             temp = ""
             for sent in sentences:
@@ -59,7 +67,8 @@ def chunk_text(text: str, chunk_size: int, overlap: int) -> list[str]:
                     if temp:
                         chunks.append(temp.strip())
                     temp = sent
-            current = temp
+            if temp:
+                chunks.append(temp.strip())
         elif len(current) + len(para) + 1 <= chunk_size:
             current += para + "\n"
         else:
@@ -71,6 +80,24 @@ def chunk_text(text: str, chunk_size: int, overlap: int) -> list[str]:
     if current.strip():
         chunks.append(current.strip())
     return [c for c in chunks if c]
+
+
+def chunk_file(file_path: str, chunk_size: int, overlap: int) -> list[str]:
+    """流式分块：逐行读取文件，避免一次性加载大文件到内存"""
+    def _iter_lines():
+        with open(file_path, "r", encoding="utf-8") as f:
+            for line in f:
+                para = line.strip()
+                if para:
+                    yield para
+
+    return _chunk_paragraphs(_iter_lines(), chunk_size, overlap)
+
+
+def chunk_text(text: str, chunk_size: int, overlap: int) -> list[str]:
+    """按段落分割，优先保持段落完整，超长则按句分割，带重叠"""
+    paragraphs = [p.strip() for p in text.split("\n") if p.strip()]
+    return _chunk_paragraphs(paragraphs, chunk_size, overlap)
 
 
 # ─── HyDE 问题生成 ────────────────────────────────────────────────────────────
@@ -135,91 +162,140 @@ def generate_hyde_questions(client: openai.OpenAI, chunk: str, parent_id: str, r
 
 # ─── 主流程 ───────────────────────────────────────────────────────────────────
 
+
+
+def _check_memory(label: str = "") -> bool:
+    """检查内存用量，超阈值时 GC 或中止。返回 False 表示调用方应停止处理。"""
+    if not _HAS_PSUTIL:
+        return True
+    pct = psutil.virtual_memory().percent
+    if pct >= MEM_ABORT_PCT:
+        logger.error(f"内存 {pct:.1f}% 超过中止阈值 {MEM_ABORT_PCT}%，安全退出 {label}")
+        return False
+    if pct >= MEM_GC_PCT:
+        logger.warning(f"内存 {pct:.1f}% 超过 GC 阈值，强制回收 {label}")
+        gc.collect()
+    elif pct >= MEM_WARN_PCT:
+        logger.info(f"内存 {pct:.1f}% 较高 {label}")
+    return True
+
 if __name__ == "__main__":
-    # 1. 读取源文件
-    src = os.path.join(os.path.dirname(__file__), "..", "data", "Android 开发核心注意事项与避坑指南")
-    with open(src, "r", encoding="utf-8") as f:
-        content = f.read()
-    logger.info(f"源文件加载: {len(content)} 字符")
+    # 0. 清理旧向量数据
+    if os.path.exists(CHROMA_DB_PATH):
+        shutil.rmtree(CHROMA_DB_PATH)
+        logger.info(f"清理旧向量数据库: {CHROMA_DB_PATH}")
 
-    # 2. 构建 parent chunks
-    parent_chunks = chunk_text(content, PARENT_CHUNK_SIZE, PARENT_OVERLAP)
-    logger.info(f"Parent chunks: {len(parent_chunks)} 个 (size={PARENT_CHUNK_SIZE}, overlap={PARENT_OVERLAP})")
+    # 1. 扫描 data 目录下所有文件
+    data_dir = os.path.join(os.path.dirname(__file__), "..", "data")
+    files = [f for f in os.listdir(data_dir) if os.path.isfile(os.path.join(data_dir, f))]
+    if not files:
+        logger.warning(f"data 目录为空: {data_dir}")
+        exit(0)
+    logger.info(f"发现 {len(files)} 个源文件，流式索引中...")
 
-    # 3. 构建 child chunks（每个 parent 内部细分）
-    child_records: list[dict] = []
-    for p_idx, p_text in enumerate(parent_chunks):
-        children = chunk_text(p_text, CHILD_CHUNK_SIZE, CHILD_OVERLAP)
-        for c_idx, c_text in enumerate(children):
-            child_records.append({
-                "id": f"c_{p_idx}_{c_idx}",
-                "text": c_text,
-                "parent_id": f"p_{p_idx}",
-            })
-    logger.info(f"Child chunks: {len(child_records)} 个 (size={CHILD_CHUNK_SIZE}, overlap={CHILD_OVERLAP})")
-
-    # 4. 生成 HyDE 假设性问题（每 parent 3 个）
-    llm = openai.OpenAI(api_key=MINIMAX_API_KEY, base_url=MINIMAX_BASE_URL)
-    hyde_records: list[dict] = []
-    logger.info(f"开始生成 HyDE 问题 ({len(parent_chunks)} 个 parent)...")
-    for p_idx, p_text in enumerate(parent_chunks):
-        p_id = f"p_{p_idx}"
-        questions = generate_hyde_questions(llm, p_text, p_id)
-        for q_idx, q in enumerate(questions):
-            hyde_records.append({
-                "id": f"h_{p_idx}_{q_idx}",
-                "text": q,
-                "parent_id": p_id,
-            })
-        logger.info(f"  [{p_idx + 1}/{len(parent_chunks)}] {p_id}: {len(questions)} 个问题")
-        time.sleep(0.3)  # 避免触发限速
-    logger.info(f"HyDE 问题总计: {len(hyde_records)} 个")
-
-    # 5. 写入 ChromaDB
+    # 2. 初始化 ChromaDB（提前建库，边处理边写入）
     db = chromadb.PersistentClient(path=CHROMA_DB_PATH)
-
     for name in ["android_parent", "android_child", "android_hyde"]:
         try:
             db.delete_collection(name)
-            logger.info(f"删除旧 collection: {name}")
         except Exception:
             pass
-
     col_parent = db.create_collection("android_parent")
     col_child = db.create_collection("android_child")
     col_hyde = db.create_collection("android_hyde")
 
-    # 写入 parent
-    col_parent.add(
-        documents=parent_chunks,
-        ids=[f"p_{i}" for i in range(len(parent_chunks))],
-        metadatas=[{"chunk_idx": i} for i in range(len(parent_chunks))],
-    )
-    logger.info(f"android_parent: 写入 {len(parent_chunks)} 条")
-
-    # 批量写入 child（每批 100 条）
+    # 3. 流式处理：逐文件读取 → 分块 → 直接写入，不保留全量列表
+    llm = openai.OpenAI(api_key=MINIMAX_API_KEY, base_url=MINIMAX_BASE_URL)
     BATCH = 100
-    for i in range(0, len(child_records), BATCH):
-        batch = child_records[i : i + BATCH]
-        col_child.add(
-            documents=[r["text"] for r in batch],
-            ids=[r["id"] for r in batch],
-            metadatas=[{"parent_id": r["parent_id"]} for r in batch],
-        )
-    logger.info(f"android_child: 写入 {len(child_records)} 条")
+    parent_idx = 0
+    child_buffer: list[dict] = []
+    hyde_buffer: list[dict] = []
+    total_child = 0
+    total_hyde = 0
 
-    # 写入 hyde
-    if hyde_records:
-        col_hyde.add(
-            documents=[r["text"] for r in hyde_records],
-            ids=[r["id"] for r in hyde_records],
-            metadatas=[{"parent_id": r["parent_id"]} for r in hyde_records],
+
+    for fname in sorted(files):
+        fpath = os.path.join(data_dir, fname)
+        fsize = os.path.getsize(fpath)
+        logger.info(f"  处理: {fname} ({fsize / 1024:.1f} KB)")
+
+        # 单个文件分块后即时处理，不累积到全局列表
+        for p_text in chunk_file(fpath, PARENT_CHUNK_SIZE, PARENT_OVERLAP):
+            p_id = f"p_{parent_idx}"
+
+            # 即时写入 parent
+            col_parent.add(
+                documents=[p_text],
+                ids=[p_id],
+                metadatas=[{"chunk_idx": parent_idx, "source": fname}],
+            )
+
+            # 生成 child chunks，缓冲满 BATCH 即 flush
+            for c_idx, c_text in enumerate(chunk_text(p_text, CHILD_CHUNK_SIZE, CHILD_OVERLAP)):
+                child_buffer.append({
+                    "id": f"c_{parent_idx}_{c_idx}",
+                    "text": c_text,
+                    "parent_id": p_id,
+                })
+                if len(child_buffer) >= BATCH:
+                    col_child.add(
+                        documents=[r["text"] for r in child_buffer],
+                        ids=[r["id"] for r in child_buffer],
+                        metadatas=[{"parent_id": r["parent_id"]} for r in child_buffer],
+                    )
+                    total_child += len(child_buffer)
+                    child_buffer = []
+
+            # 生成 HyDE 问题，缓冲满 BATCH 即 flush
+            questions = generate_hyde_questions(llm, p_text, p_id)
+            for q_idx, q in enumerate(questions):
+                hyde_buffer.append({
+                    "id": f"h_{parent_idx}_{q_idx}",
+                    "text": q,
+                    "parent_id": p_id,
+                })
+                if len(hyde_buffer) >= BATCH:
+                    col_hyde.add(
+                        documents=[r["text"] for r in hyde_buffer],
+                        ids=[r["id"] for r in hyde_buffer],
+                        metadatas=[{"parent_id": r["parent_id"]} for r in hyde_buffer],
+                    )
+                    total_hyde += len(hyde_buffer)
+                    hyde_buffer = []
+
+            parent_idx += 1
+            if parent_idx % 10 == 0:
+                logger.info(f"    已处理 {parent_idx} 个 parent chunks...")
+                if not _check_memory(f"[{parent_idx} parents]"):
+                    break
+
+        # 每个文件结束后检查内存并释放
+        if not _check_memory(f"[文件 {fname}]"):
+            break
+
+    # 4. flush 剩余缓冲
+    if child_buffer:
+        col_child.add(
+            documents=[r["text"] for r in child_buffer],
+            ids=[r["id"] for r in child_buffer],
+            metadatas=[{"parent_id": r["parent_id"]} for r in child_buffer],
         )
-    logger.info(f"android_hyde: 写入 {len(hyde_records)} 条")
+        total_child += len(child_buffer)
+    if hyde_buffer:
+        col_hyde.add(
+            documents=[r["text"] for r in hyde_buffer],
+            ids=[r["id"] for r in hyde_buffer],
+            metadatas=[{"parent_id": r["parent_id"]} for r in hyde_buffer],
+        )
+        total_hyde += len(hyde_buffer)
+
+    logger.info(f"android_parent: 写入 {parent_idx} 条")
+    logger.info(f"android_child : 写入 {total_child} 条")
+    logger.info(f"android_hyde  : 写入 {total_hyde} 条")
 
     logger.info("=" * 50)
     logger.info("Phase 1 索引构建完成")
-    logger.info(f"  android_parent : {len(parent_chunks)} 个")
-    logger.info(f"  android_child  : {len(child_records)} 个")
-    logger.info(f"  android_hyde   : {len(hyde_records)} 个")
+    logger.info(f"  android_parent : {parent_idx} 个")
+    logger.info(f"  android_child  : {total_child} 个")
+    logger.info(f"  android_hyde   : {total_hyde} 个")
     logger.info("下一步: uv run python -m ai_app1.pre.verify_phase1")
