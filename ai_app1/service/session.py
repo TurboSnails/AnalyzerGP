@@ -7,6 +7,7 @@
 - token 预算耗尽时触发 summarize，将历史压缩为 summary 供后续上下文复用
 """
 from typing import TypedDict
+import re
 
 from ai_app1.core.logger import session_logger
 from ai_app1.service.vector_store import query_db
