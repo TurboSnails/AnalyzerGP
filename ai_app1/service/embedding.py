@@ -1,7 +1,7 @@
 """
 Embedding 模块：封装本地 BGE-M3 模型，供 ChromaDB 使用。
 
-替代 ChromaDB 默认的内置 embedding，使用 models/bge-m3 本地模型，
+替代 ChromaDB 默认的内置 embedding，使用 ai_app1/models/bge-m3（或仓库根 models/bge-m3）本地模型，
 保证索引（init_vector_db）和查询（vector_store）使用完全一致的向量表示。
 """
 
