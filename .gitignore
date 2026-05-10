@@ -68,3 +68,4 @@ env/
 /models/bge-m3/onnx/tokenizer_config.json
 /models/bge-m3/tokenizer_config.json
 /ai_app1/models/bge-m3/
+/ai_app1/models/bge-base-zh-v1.5/

@@ -9,13 +9,14 @@ if hf_token := os.getenv("HF_TOKEN"):
 
 from sentence_transformers import SentenceTransformer
 
-_ROOT = Path(__file__).resolve().parent
+_ROOT = Path(__file__).resolve().parent.parent
 
-# 本地模型目录（download_bge_m3.py 默认下载到 test/models/<预设名>/）
+# 本地模型目录（download_bge_m3.py 默认下载到 ai_app1/models/<预设名>/）
 _USE_LOCAL = os.getenv("EMBEDDING_MODEL_LOCAL", "1").strip().lower() not in ("0", "false", "no")
 
 # bge-base-zh-v1.5（已下载）
-_MODEL_DIR = _ROOT / "models" / "bge-base-zh-v1.5"
+_MODEL_DIR = _ROOT / "models" / "bge-m3"
+# _MODEL_DIR = _ROOT / "models" / "bge-base-zh-v1.5"
 
 # 改用 bge-m3：先下载 → 再把上面改成 bge-m3 目录
 #   在 ai_app1 下: uv run python test/download_bge_m3.py --preset bge-m3

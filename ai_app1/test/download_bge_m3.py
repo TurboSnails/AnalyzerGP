@@ -34,7 +34,7 @@ load_dotenv()
 
 
 def main() -> None:
-    default_models_parent = Path(__file__).resolve().parent / "models"
+    default_models_parent = Path(__file__).resolve().parent.parent / "models"
 
     parser = argparse.ArgumentParser(
         description="Download a sentence-transformers model from Hugging Face Hub",
