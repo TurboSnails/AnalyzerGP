@@ -33,6 +33,7 @@ PARENT_CHUNK_SIZE = 512
 PARENT_OVERLAP = 100
 CHILD_CHUNK_SIZE = 128
 CHILD_OVERLAP = 25
+BATCH = 100
 
 MINIMAX_API_KEY = os.getenv("OPENAI_API_KEY")
 MINIMAX_BASE_URL = "https://api.minimaxi.com/v1"
@@ -164,6 +165,35 @@ def generate_hyde_questions(client: openai.OpenAI, chunk: str, parent_id: str, r
 
 
 
+class _BufferedWriter:
+    """将 (id, text, parent_id) 记录缓冲写入 ChromaDB collection，满 batch 自动 flush。"""
+
+    def __init__(self, collection, batch: int = BATCH):
+        self._col = collection
+        self._batch = batch
+        self._buf: list[dict] = []
+        self.total = 0
+
+    def add(self, id_: str, text: str, parent_id: str) -> None:
+        self._buf.append({"id": id_, "text": text, "parent_id": parent_id})
+        if len(self._buf) >= self._batch:
+            self._flush()
+
+    def _flush(self) -> None:
+        if not self._buf:
+            return
+        self._col.add(
+            documents=[r["text"] for r in self._buf],
+            ids=[r["id"] for r in self._buf],
+            metadatas=[{"parent_id": r["parent_id"]} for r in self._buf],
+        )
+        self.total += len(self._buf)
+        self._buf = []
+
+    def close(self) -> None:
+        self._flush()
+
+
 def _check_memory(label: str = "") -> bool:
     """检查内存用量，超阈值时 GC 或中止。返回 False 表示调用方应停止处理。"""
     if not _HAS_PSUTIL:
@@ -206,12 +236,9 @@ if __name__ == "__main__":
 
     # 3. 流式处理：逐文件读取 → 分块 → 直接写入，不保留全量列表
     llm = openai.OpenAI(api_key=MINIMAX_API_KEY, base_url=MINIMAX_BASE_URL)
-    BATCH = 100
     parent_idx = 0
-    child_buffer: list[dict] = []
-    hyde_buffer: list[dict] = []
-    total_child = 0
-    total_hyde = 0
+    child_writer = _BufferedWriter(col_child, BATCH)
+    hyde_writer  = _BufferedWriter(col_hyde,  BATCH)
 
 
     for fname in sorted(files):
@@ -232,36 +259,12 @@ if __name__ == "__main__":
 
             # 生成 child chunks，缓冲满 BATCH 即 flush
             for c_idx, c_text in enumerate(chunk_text(p_text, CHILD_CHUNK_SIZE, CHILD_OVERLAP)):
-                child_buffer.append({
-                    "id": f"c_{parent_idx}_{c_idx}",
-                    "text": c_text,
-                    "parent_id": p_id,
-                })
-                if len(child_buffer) >= BATCH:
-                    col_child.add(
-                        documents=[r["text"] for r in child_buffer],
-                        ids=[r["id"] for r in child_buffer],
-                        metadatas=[{"parent_id": r["parent_id"]} for r in child_buffer],
-                    )
-                    total_child += len(child_buffer)
-                    child_buffer = []
+                child_writer.add(f"c_{parent_idx}_{c_idx}", c_text, p_id)
 
             # 生成 HyDE 问题，缓冲满 BATCH 即 flush
             questions = generate_hyde_questions(llm, p_text, p_id)
             for q_idx, q in enumerate(questions):
-                hyde_buffer.append({
-                    "id": f"h_{parent_idx}_{q_idx}",
-                    "text": q,
-                    "parent_id": p_id,
-                })
-                if len(hyde_buffer) >= BATCH:
-                    col_hyde.add(
-                        documents=[r["text"] for r in hyde_buffer],
-                        ids=[r["id"] for r in hyde_buffer],
-                        metadatas=[{"parent_id": r["parent_id"]} for r in hyde_buffer],
-                    )
-                    total_hyde += len(hyde_buffer)
-                    hyde_buffer = []
+                hyde_writer.add(f"h_{parent_idx}_{q_idx}", q, p_id)
 
             parent_idx += 1
             if parent_idx % 10 == 0:
@@ -274,28 +277,16 @@ if __name__ == "__main__":
             break
 
     # 4. flush 剩余缓冲
-    if child_buffer:
-        col_child.add(
-            documents=[r["text"] for r in child_buffer],
-            ids=[r["id"] for r in child_buffer],
-            metadatas=[{"parent_id": r["parent_id"]} for r in child_buffer],
-        )
-        total_child += len(child_buffer)
-    if hyde_buffer:
-        col_hyde.add(
-            documents=[r["text"] for r in hyde_buffer],
-            ids=[r["id"] for r in hyde_buffer],
-            metadatas=[{"parent_id": r["parent_id"]} for r in hyde_buffer],
-        )
-        total_hyde += len(hyde_buffer)
+    child_writer.close()
+    hyde_writer.close()
 
     logger.info(f"android_parent: 写入 {parent_idx} 条")
-    logger.info(f"android_child : 写入 {total_child} 条")
-    logger.info(f"android_hyde  : 写入 {total_hyde} 条")
+    logger.info(f"android_child : 写入 {child_writer.total} 条")
+    logger.info(f"android_hyde  : 写入 {hyde_writer.total} 条")
 
     logger.info("=" * 50)
     logger.info("Phase 1 索引构建完成")
     logger.info(f"  android_parent : {parent_idx} 个")
-    logger.info(f"  android_child  : {total_child} 个")
-    logger.info(f"  android_hyde   : {total_hyde} 个")
+    logger.info(f"  android_child  : {child_writer.total} 个")
+    logger.info(f"  android_hyde   : {hyde_writer.total} 个")
     logger.info("下一步: uv run python -m ai_app1.pre.verify_phase1")
