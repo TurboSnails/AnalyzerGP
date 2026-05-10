@@ -11,3 +11,4 @@ ENV/
 env/
 /ai_app1/pre/chroma_db/
 /pre/chroma_db/chroma.sqlite3
+/ai_app1/test/models/
