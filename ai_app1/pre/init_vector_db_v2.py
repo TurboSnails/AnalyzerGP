@@ -18,6 +18,8 @@ import openai
 import chromadb
 from dotenv import load_dotenv
 
+from ai_app1.service.embedding import get_embedding_function
+
 try:
     import psutil
     _HAS_PSUTIL = True
@@ -230,9 +232,11 @@ if __name__ == "__main__":
             db.delete_collection(name)
         except Exception:
             pass
-    col_parent = db.create_collection("android_parent")
-    col_child = db.create_collection("android_child")
-    col_hyde = db.create_collection("android_hyde")
+
+    ef = get_embedding_function()
+    col_parent = db.create_collection("android_parent", embedding_function=ef)
+    col_child = db.create_collection("android_child", embedding_function=ef)
+    col_hyde = db.create_collection("android_hyde", embedding_function=ef)
 
     # 3. 流式处理：逐文件读取 → 分块 → 直接写入，不保留全量列表
     llm = openai.OpenAI(api_key=MINIMAX_API_KEY, base_url=MINIMAX_BASE_URL)

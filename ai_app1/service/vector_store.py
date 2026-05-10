@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 import chromadb
 from ai_app1.core.config import CHROMA_DB_PATH
+from ai_app1.service.embedding import get_embedding_function
 
 logger = logging.getLogger("vector_store")
 
@@ -34,6 +35,16 @@ RERANK_TOP_K = 5         # 最终喂给 LLM 的片段数
 _client: chromadb.PersistentClient | None = None
 
 
+_ef = None
+
+
+def _get_ef():
+    global _ef
+    if _ef is None:
+        _ef = get_embedding_function()
+    return _ef
+
+
 def _get_client() -> chromadb.PersistentClient:
     global _client
     if _client is None:
@@ -43,7 +54,7 @@ def _get_client() -> chromadb.PersistentClient:
 
 def _get_collection(name: str):
     try:
-        return _get_client().get_collection(name)
+        return _get_client().get_collection(name, embedding_function=_get_ef())
     except Exception:
         return None
 
@@ -241,7 +252,9 @@ def query_db(query: str) -> str | None:
 
 def _legacy_query(query: str) -> str | None:
     """旧版 android_docs collection 单路向量检索（降级用）"""
-    col = _get_client().get_or_create_collection("android_docs")
+    col = _get_client().get_or_create_collection(
+        "android_docs", embedding_function=_get_ef()
+    )
     results = col.query(query_texts=[query], n_results=5)
     docs = results["documents"][0]
     distances = results["distances"][0]

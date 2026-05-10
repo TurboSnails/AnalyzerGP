@@ -3,6 +3,7 @@ import re
 import shutil
 import chromadb
 from ai_app1.core.config import CHROMA_DB_PATH
+from ai_app1.service.embedding import get_embedding_function
 
 
 def get_project_root() -> str:
@@ -81,7 +82,10 @@ if __name__ == "__main__":
     delete_collection()
 
     client = chromadb.PersistentClient(path=CHROMA_DB_PATH)
-    collection = client.get_or_create_collection(name="android_docs")
+    collection = client.get_or_create_collection(
+        name="android_docs",
+        embedding_function=get_embedding_function(),
+    )
 
     source_file = os.path.join(get_project_root(), "ai_app1", "Android 开发核心注意事项与避坑指南")
     with open(source_file, "r", encoding="utf-8") as f:
