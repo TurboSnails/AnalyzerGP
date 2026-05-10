@@ -18,7 +18,7 @@ import openai
 import chromadb
 from dotenv import load_dotenv
 
-from ai_app1.service.embedding import get_embedding_function
+from ai_app1.service.embedding import BgeM3EmbeddingService, get_embedding_service
 
 try:
     import psutil
@@ -170,8 +170,14 @@ def generate_hyde_questions(client: openai.OpenAI, chunk: str, parent_id: str, r
 class _BufferedWriter:
     """将 (id, text, parent_id) 记录缓冲写入 ChromaDB collection，满 batch 自动 flush。"""
 
-    def __init__(self, collection, batch: int = BATCH):
+    def __init__(
+        self,
+        collection,
+        embed_svc: BgeM3EmbeddingService,
+        batch: int = BATCH,
+    ):
         self._col = collection
+        self._embed = embed_svc
         self._batch = batch
         self._buf: list[dict] = []
         self.total = 0
@@ -184,10 +190,13 @@ class _BufferedWriter:
     def _flush(self) -> None:
         if not self._buf:
             return
+        texts = [r["text"] for r in self._buf]
+        embeddings = self._embed.encode(texts, batch_size=32)
         self._col.add(
-            documents=[r["text"] for r in self._buf],
             ids=[r["id"] for r in self._buf],
+            documents=texts,
             metadatas=[{"parent_id": r["parent_id"]} for r in self._buf],
+            embeddings=embeddings,
         )
         self.total += len(self._buf)
         self._buf = []
@@ -233,16 +242,16 @@ if __name__ == "__main__":
         except Exception:
             pass
 
-    ef = get_embedding_function()
-    col_parent = db.create_collection("android_parent", embedding_function=ef)
-    col_child = db.create_collection("android_child", embedding_function=ef)
-    col_hyde = db.create_collection("android_hyde", embedding_function=ef)
+    embed_svc = get_embedding_service()
+    col_parent = db.create_collection("android_parent")
+    col_child = db.create_collection("android_child")
+    col_hyde = db.create_collection("android_hyde")
 
     # 3. 流式处理：逐文件读取 → 分块 → 直接写入，不保留全量列表
     llm = openai.OpenAI(api_key=MINIMAX_API_KEY, base_url=MINIMAX_BASE_URL)
     parent_idx = 0
-    child_writer = _BufferedWriter(col_child, BATCH)
-    hyde_writer  = _BufferedWriter(col_hyde,  BATCH)
+    child_writer = _BufferedWriter(col_child, embed_svc, BATCH)
+    hyde_writer = _BufferedWriter(col_hyde, embed_svc, BATCH)
 
 
     for fname in sorted(files):
@@ -256,9 +265,10 @@ if __name__ == "__main__":
 
             # 即时写入 parent
             col_parent.add(
-                documents=[p_text],
                 ids=[p_id],
+                documents=[p_text],
                 metadatas=[{"chunk_idx": parent_idx, "source": fname}],
+                embeddings=embed_svc.encode([p_text]),
             )
 
             # 生成 child chunks，缓冲满 BATCH 即 flush

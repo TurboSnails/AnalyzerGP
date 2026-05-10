@@ -3,7 +3,7 @@ import re
 import shutil
 import chromadb
 from ai_app1.core.config import CHROMA_DB_PATH
-from ai_app1.service.embedding import get_embedding_function
+from ai_app1.service.embedding import get_embedding_service
 
 
 def get_project_root() -> str:
@@ -82,10 +82,8 @@ if __name__ == "__main__":
     delete_collection()
 
     client = chromadb.PersistentClient(path=CHROMA_DB_PATH)
-    collection = client.get_or_create_collection(
-        name="android_docs",
-        embedding_function=get_embedding_function(),
-    )
+    collection = client.get_or_create_collection(name="android_docs")
+    embed_svc = get_embedding_service()
 
     source_file = os.path.join(get_project_root(), "ai_app1", "Android 开发核心注意事项与避坑指南")
     with open(source_file, "r", encoding="utf-8") as f:
@@ -104,10 +102,12 @@ if __name__ == "__main__":
         all_metadatas.extend([{"chunk_size": size} for _ in chunks])
         print(f"chunk_size={size}: {len(chunks)} 个 chunk")
 
+    embeddings = embed_svc.encode(all_chunks, batch_size=32)
     collection.add(
-        documents=all_chunks,
         ids=all_ids,
+        documents=all_chunks,
         metadatas=all_metadatas,
+        embeddings=embeddings,
     )
 
     print(f"初始化完成，共 {len(all_chunks)} 个 chunk")

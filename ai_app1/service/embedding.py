@@ -1,8 +1,6 @@
 """
-Embedding 模块：封装本地 BGE-M3 模型，供 ChromaDB 使用。
-
-替代 ChromaDB 默认的内置 embedding，使用 ai_app1/models/bge-m3（或仓库根 models/bge-m3）本地模型，
-保证索引（init_vector_db）和查询（vector_store）使用完全一致的向量表示。
+Embedding：本地 BGE-M3，显式 encode 后交给 Chroma（add(embeddings=...) / query(query_embeddings=...)），
+不把编码交给 Chroma 内置 embedding_function，便于缓存、换模型、插 pipeline。
 """
 
 from __future__ import annotations
@@ -11,8 +9,6 @@ import logging
 import os
 from typing import cast
 
-import chromadb
-from chromadb.api.types import Documents, EmbeddingFunction, Embeddings
 from sentence_transformers import SentenceTransformer
 
 from ai_app1.core.config import BGE_M3_PATH
@@ -20,80 +16,71 @@ from ai_app1.core.config import BGE_M3_PATH
 logger = logging.getLogger("embedding")
 
 
-class BgeM3EmbeddingFunction(EmbeddingFunction):
-    """
-    基于本地 BGE-M3 的 ChromaDB EmbeddingFunction。
-
-    单例模型：首次实例化时加载 SentenceTransformer，后续复用，
-    避免重复初始化带来的内存和启动开销。
-    """
-
-    _instance: BgeM3EmbeddingFunction | None = None
-    _model: SentenceTransformer | None = None
-
-    def __new__(cls, *args, **kwargs) -> BgeM3EmbeddingFunction:  # type: ignore[no-untyped-def]
-        if cls._instance is None:
-            cls._instance = super().__new__(cls)
-        return cls._instance
+class BgeM3EmbeddingService:
+    """封装 SentenceTransformer，对外只暴露 encode。"""
 
     def __init__(self, model_path: str | None = None) -> None:
-        """
-        初始化/复用 BGE-M3 模型。
+        self._path = model_path or BGE_M3_PATH
+        self._model: SentenceTransformer | None = None
 
-        Args:
-            model_path: 本地模型目录路径，默认读取 core.config.BGE_M3_PATH。
-        """
+    def _ensure_model(self) -> None:
         if self._model is not None:
             return
-
-        path = model_path or BGE_M3_PATH
+        path = self._path
         if not os.path.isdir(path):
             raise FileNotFoundError(
                 f"BGE-M3 模型目录不存在: {path}\n"
                 "请先下载模型，例如:\n"
                 "  uv run python ai_app1/test/download_bge_m3.py --preset bge-m3"
             )
-
         logger.info(f"正在加载 BGE-M3 模型: {path}")
         self._model = SentenceTransformer(path)
         logger.info("BGE-M3 模型加载完成")
 
-    def __call__(self, input: Documents) -> Embeddings:  # type: ignore[override]
+    def encode(self, texts: list[str], batch_size: int | None = 32) -> list[list[float]]:
         """
-        对输入文本列表进行向量化。
+        文本 → 向量（已 L2 normalize，与原先 Chroma 内嵌编码一致）。
 
-        Args:
-            input: ChromaDB 传入的文本列表（Documents）。
-
-        Returns:
-            Embeddings: 二维浮点列表，每行对应一个文本的向量。
+        batch_size：长列表分批 encode，降低峰值显存；None 表示不分批。
         """
-        if self._model is None:
-            raise RuntimeError("BgeM3EmbeddingFunction 未正确初始化")
+        self._ensure_model()
+        if not texts:
+            return []
+        if batch_size is None or len(texts) <= batch_size:
+            embeddings = self._model.encode(
+                texts,
+                normalize_embeddings=True,
+                show_progress_bar=False,
+            )
+            return cast(list[list[float]], embeddings.tolist())
 
-        embeddings = self._model.encode(
-            list(input),
-            normalize_embeddings=True,
-            show_progress_bar=False,
-        )
-        return cast(Embeddings, embeddings.tolist())
-
-    @classmethod
-    def reset(cls) -> None:
-        """强制释放模型实例（主要用于测试或热更新场景）。"""
-        cls._instance = None
-        cls._model = None
-        logger.info("BgeM3EmbeddingFunction 已重置")
+        out: list[list[float]] = []
+        for i in range(0, len(texts), batch_size):
+            chunk = texts[i : i + batch_size]
+            embeddings = self._model.encode(
+                chunk,
+                normalize_embeddings=True,
+                show_progress_bar=False,
+            )
+            out.extend(embeddings.tolist())
+        return out
 
 
-# ─── 便捷入口 ─────────────────────────────────────────────────────────────────
-
-_embedding_fn: BgeM3EmbeddingFunction | None = None
+_embedding_service: BgeM3EmbeddingService | None = None
 
 
-def get_embedding_function() -> EmbeddingFunction:
-    """获取全局 BGE-M3 EmbeddingFunction 实例（惰性初始化）。"""
-    global _embedding_fn
-    if _embedding_fn is None:
-        _embedding_fn = BgeM3EmbeddingFunction()
-    return _embedding_fn
+def get_embedding_service(model_path: str | None = None) -> BgeM3EmbeddingService:
+    """全局 Embedding 服务（惰性加载模型）。"""
+    global _embedding_service
+    if _embedding_service is None:
+        _embedding_service = BgeM3EmbeddingService(model_path=model_path)
+    return _embedding_service
+
+
+def reset_embedding_service() -> None:
+    """释放模型引用（测试或热替换模型时）。"""
+    global _embedding_service
+    if _embedding_service is not None:
+        _embedding_service._model = None
+        _embedding_service = None
+    logger.info("BgeM3EmbeddingService 已重置")

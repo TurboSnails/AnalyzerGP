@@ -17,7 +17,7 @@ from __future__ import annotations
 import logging
 import chromadb
 from ai_app1.core.config import CHROMA_DB_PATH
-from ai_app1.service.embedding import get_embedding_function
+from ai_app1.service.embedding import get_embedding_service
 
 logger = logging.getLogger("vector_store")
 
@@ -35,14 +35,14 @@ RERANK_TOP_K = 5         # 最终喂给 LLM 的片段数
 _client: chromadb.PersistentClient | None = None
 
 
-_ef = None
+_embed_svc = None
 
 
-def _get_ef():
-    global _ef
-    if _ef is None:
-        _ef = get_embedding_function()
-    return _ef
+def _get_embed():
+    global _embed_svc
+    if _embed_svc is None:
+        _embed_svc = get_embedding_service()
+    return _embed_svc
 
 
 def _get_client() -> chromadb.PersistentClient:
@@ -54,7 +54,7 @@ def _get_client() -> chromadb.PersistentClient:
 
 def _get_collection(name: str):
     try:
-        return _get_client().get_collection(name, embedding_function=_get_ef())
+        return _get_client().get_collection(name)
     except Exception:
         return None
 
@@ -106,7 +106,8 @@ def _aggregate_parent_hits(metas, distances, max_dist: float, top_k: int):
 
 def _query_dense(query: str, col_child) -> list[str]:
     """路A：向量检索 child → 聚合 parent_id，按多命中加权 distance 升序"""
-    result = col_child.query(query_texts=[query], n_results=DENSE_QUERY_K)
+    q_emb = _get_embed().encode([query])
+    result = col_child.query(query_embeddings=q_emb, n_results=DENSE_QUERY_K)
     metas = result["metadatas"][0]
     distances = result["distances"][0]
 
@@ -127,7 +128,8 @@ def _query_dense(query: str, col_child) -> list[str]:
 
 def _query_hyde(query: str, col_hyde) -> list[str]:
     """路B：向量检索 HyDE 假设问题 → 聚合 parent_id，按多命中加权 distance 升序"""
-    result = col_hyde.query(query_texts=[query], n_results=HYDE_QUERY_K)
+    q_emb = _get_embed().encode([query])
+    result = col_hyde.query(query_embeddings=q_emb, n_results=HYDE_QUERY_K)
     metas = result["metadatas"][0]
     distances = result["distances"][0]
 
@@ -252,10 +254,9 @@ def query_db(query: str) -> str | None:
 
 def _legacy_query(query: str) -> str | None:
     """旧版 android_docs collection 单路向量检索（降级用）"""
-    col = _get_client().get_or_create_collection(
-        "android_docs", embedding_function=_get_ef()
-    )
-    results = col.query(query_texts=[query], n_results=5)
+    col = _get_client().get_or_create_collection("android_docs")
+    q_emb = _get_embed().encode([query])
+    results = col.query(query_embeddings=q_emb, n_results=5)
     docs = results["documents"][0]
     distances = results["distances"][0]
 
