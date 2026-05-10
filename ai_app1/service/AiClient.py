@@ -38,8 +38,8 @@ class AiClient:
 
     async def _stream_response(self, messages: list, use_tools: bool = False):
         """
-        通用的流式响应处理逻辑，提取公共逻辑供 chat / run_agent 系列方法复用。
-        当 use_tools=True 且模型返回 tool_calls 时，切换为非流式完整收集再响应。
+        流式响应：每个 token 立即 yield，不缓冲。
+        use_tools 只控制是否将工具定义发给模型，tool_calls 由 stream_run_agent 负责处理。
         """
         kwargs = {
             "model": "MiniMax-M2.7",
@@ -51,49 +51,9 @@ class AiClient:
 
         response = await self.client.chat.completions.create(**kwargs)
 
-        if use_tools:
-            # 工具模式：先完整收集 tool_calls，再非流式执行工具，最后继续流式响应
-            full = ""
-            async for chunk in response:
-                delta = chunk.choices[0].delta
-                if delta.content:
-                    full += delta.content
-            msg_content = full
-
-            if not msg_content:
-                return
-
-            response_message = type("obj", (object,), {
-                "content": msg_content,
-                "tool_calls": None
-            })()
-
-            if not response_message.tool_calls:
-                yield msg_content
-                return
-
-            tool_results = []
-            for tool_call in response_message.tool_calls:
-                func_name = tool_call.function.name
-                func_args = json.loads(tool_call.function.arguments)
-                try:
-                    result = TOOL_FUNCTIONS[func_name](**func_args) if func_name in TOOL_FUNCTIONS else f"Unknown tool: {func_name}"
-                except Exception as e:
-                    result = f"Error: {str(e)}"
-                tool_results.append({
-                    "tool_call_id": tool_call.id,
-                    "role": "tool",
-                    "content": str(result)
-                })
-
-            messages.append(response_message.model_dump() if hasattr(response_message, "model_dump") else {"role": "assistant", "content": msg_content})
-            messages.extend(tool_results)
-
-            async for chunk in self._stream_response(messages, use_tools=False):
-                yield chunk
-            return
-
         async for chunk in response:
+            if not chunk.choices:
+                continue
             delta = chunk.choices[0].delta
             if delta.content:
                 yield delta.content
