@@ -81,8 +81,8 @@ async def chat(req: ChatRequest, ai_client: AiClient = Depends(get_ai_client)):
     add_user_message(session, req.message)
     chat_logger.debug(f"[{req_id}] 用户消息已添加: history_len={len(session['history'])}")
 
-    # 2. 构建发送给 LLM 的完整消息列表
-    messages = build_messages(session, req.message)
+    # 2. 构建发送给 LLM 的完整消息列表（query_db 含模型推理，放入线程池避免阻塞事件循环）
+    messages = await asyncio.to_thread(build_messages, session, req.message)
     chat_logger.debug(f"[{req_id}] messages 构建完成: {len(messages)} 条")
 
     # 3. 流式收集完整回复，同时流式 yield 给客户端
