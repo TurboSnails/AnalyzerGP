@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 from typing import cast
 
 from sentence_transformers import SentenceTransformer
@@ -22,6 +23,8 @@ class BgeM3EmbeddingService:
     def __init__(self, model_path: str | None = None) -> None:
         self._path = model_path or BGE_M3_PATH
         self._model: SentenceTransformer | None = None
+        # HF fast tokenizer (Rust RefCell) 不允许并发调用；用锁序列化 encode
+        self._lock = threading.Lock()
 
     def _ensure_model(self) -> None:
         if self._model is not None:
@@ -46,24 +49,25 @@ class BgeM3EmbeddingService:
         self._ensure_model()
         if not texts:
             return []
-        if batch_size is None or len(texts) <= batch_size:
-            embeddings = self._model.encode(
-                texts,
-                normalize_embeddings=True,
-                show_progress_bar=False,
-            )
-            return cast(list[list[float]], embeddings.tolist())
+        with self._lock:
+            if batch_size is None or len(texts) <= batch_size:
+                embeddings = self._model.encode(
+                    texts,
+                    normalize_embeddings=True,
+                    show_progress_bar=False,
+                )
+                return cast(list[list[float]], embeddings.tolist())
 
-        out: list[list[float]] = []
-        for i in range(0, len(texts), batch_size):
-            chunk = texts[i : i + batch_size]
-            embeddings = self._model.encode(
-                chunk,
-                normalize_embeddings=True,
-                show_progress_bar=False,
-            )
-            out.extend(embeddings.tolist())
-        return out
+            out: list[list[float]] = []
+            for i in range(0, len(texts), batch_size):
+                chunk = texts[i : i + batch_size]
+                embeddings = self._model.encode(
+                    chunk,
+                    normalize_embeddings=True,
+                    show_progress_bar=False,
+                )
+                out.extend(embeddings.tolist())
+            return out
 
 
 _embedding_service: BgeM3EmbeddingService | None = None
