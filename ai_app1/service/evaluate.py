@@ -101,7 +101,9 @@ def run_eval(top_k_label: str = "5") -> None:
     for i, item in enumerate(dataset, 1):
         query    = item["query"]
         expected = item.get("expected_chunk", "")
-        evidence = item.get("evidence", "")
+        raw_ev   = item.get("evidence", "")
+        # evidence 可能是 str 或 list（多条证据）
+        evidence = " ".join(raw_ev) if isinstance(raw_ev, list) else str(raw_ev)
 
         t0 = time.perf_counter()
         result_text = query_db(query) or ""
