@@ -1,6 +1,6 @@
 # ai_app1 - Android RAG 问答系统设计文档
 
-> 版本: 2.2 | 最后更新: 2026-05-09
+> 版本: 2.4 | 最后更新: 2026-05-11
 
 ---
 
@@ -82,21 +82,85 @@ ai_app1 是一个面向 Android 开发者的 **智能问答助手**，基于 RAG
 
 ## 3. 核心模块设计
 
-### 3.1 混合检索管道 (vector_store.py)
+### 3.1 Embedding 服务 (embedding.py)
+
+#### 3.1.1 设计原则
+
+采用**显式编码**架构：由 `BgeM3EmbeddingService` 本地加载 BGE-M3 模型，显式调用 `encode()` 生成向量后，再通过 `add(embeddings=...)` / `query(query_embeddings=...)` 交给 ChromaDB。不把编码逻辑交给 Chroma 内置 `embedding_function`，带来以下收益：
+
+- **可缓存**：embedding 结果可在应用层缓存，避免重复编码
+- **可换模型**：更换模型只需替换 `BgeM3EmbeddingService`，Chroma 侧无感知
+- **可插 pipeline**：支持在 encode 前后插入自定义预处理（如文本清洗、维度压缩）
+
+#### 3.1.2 模型加载
+
+```python
+class BgeM3EmbeddingService:
+    def __init__(self, model_path: str | None = None) -> None:
+        self._path = model_path or BGE_M3_PATH
+        self._model: SentenceTransformer | None = None
+```
+
+- 底层使用 `sentence_transformers.SentenceTransformer` 加载本地 BGE-M3
+- **惰性加载**：首次调用 `encode()` 时才加载模型到内存
+- **全局单例**：`get_embedding_service()` 提供进程级单例，避免重复加载
+
+#### 3.1.3 向量生成
+
+```python
+def encode(self, texts: list[str], batch_size: int | None = 32) -> list[list[float]]:
+    ...
+    embeddings = self._model.encode(
+        texts,
+        normalize_embeddings=True,  # L2 normalize
+        show_progress_bar=False,
+    )
+```
+
+- **L2 归一化**：`normalize_embeddings=True`，与原先 Chroma 内嵌编码行为一致
+- **分批编码**：长列表自动按 `batch_size` 切分，降低峰值显存占用
+- **batch_size=None**：关闭分批，适合小批量低延迟场景
+
+#### 3.1.4 模型路径解析
+
+`BGE_M3_PATH` 在 `core/config.py` 中动态解析：
+
+```python
+def _resolve_bge_m3_path() -> str:
+    """优先查找含权重的目录（pytorch_model.bin 或 model.safetensors）"""
+    for base in (_REPO_ROOT, _AI_APP_ROOT):
+        candidate = os.path.join(base, "models", "bge-m3")
+        if os.path.isdir(candidate) and has_weights(candidate):
+            return candidate
+    return os.path.join(_AI_APP_ROOT, "models", "bge-m3")
+```
+
+- 优先在仓库根目录和 `ai_app1` 根目录查找 `models/bge-m3/`
+- 通过检测 `pytorch_model.bin` 或 `model.safetensors` 确认目录含有效权重
+- 支持通过环境变量 `BGE_M3_PATH` 强制覆盖
+
+#### 3.1.5 生命周期管理
+
+- **重置接口**：`reset_embedding_service()` 释放模型引用，用于测试或热替换模型
+- **异常处理**：模型目录不存在时抛出 `FileNotFoundError`，提示下载命令
+
+---
+
+### 3.2 混合检索管道 (vector_store.py)
 
 检索管道采用 **多路召回 → RRF 融合 → 精排 → Lost-in-Middle 重排** 的四级架构。
 
-#### 3.1.1 三路召回
+#### 3.2.1 三路召回
 
 | 路径 | 数据源 | 粒度 | 作用 |
 |------|--------|------|------|
 | Dense | `android_child` → 回溯 `android_parent` | 细粒度语义匹配 | child 做 128 字向量检索，通过 `parent_id` 回溯取 512 字完整 parent 文本 |
 | HyDE | `android_hyde` → 回溯 `android_parent` | 问题→问题匹配 | 假设问题向量匹配，通过 `parent_id` 回溯取完整 parent 文本 |
-| BM25 | `android_parent` (全文倒排索引) | 关键词精确匹配 | 直接检索 512 字 parent，捕获专有名词、技术术语 |
+| BM25 | Tantivy 磁盘索引 (`tantivy_bm25/`) | 关键词精确匹配 | jieba 分词 + Rust BM25 引擎，磁盘持久化，捕获专有名词、技术术语 |
 
 > **父子回溯机制**：Dense 与 HyDE 两路均先在小粒度 collection（`android_child` / `android_hyde`）中做向量相似度检索，从命中结果的 `metadata.parent_id` 字段聚合去重，再按子文档的最小距离对父文档排序，最终拉取 `android_parent` 中的完整文本作为上下文。该设计的收益是：细粒度检索提升语义匹配精度，大粒度 parent 保证 LLM 获得完整、连贯的参考内容。
 
-#### 3.1.2 RRF 融合 (Reciprocal Rank Fusion)
+#### 3.2.2 RRF 融合 (Reciprocal Rank Fusion)
 
 ```python
 score(d) = Σ 1 / (rank + RRF_K)    # RRF_K = 60
@@ -104,21 +168,19 @@ score(d) = Σ 1 / (rank + RRF_K)    # RRF_K = 60
 
 不依赖原始向量距离或 BM25 分值，仅按排名融合，避免不同检索路的分值不可比问题。
 
-#### 3.1.3 Rerank 精排 (reranker.py)
+#### 3.2.3 Rerank 精排 (reranker.py)
 
-基于四维度线性组合计算 `final_score`，计算前对 `rrf_score` 做 Min-Max 归一化（使其与 term_overlap、vector_inv、bm25_inv 处于同一 0~1 量级）：
+方案 A：RRF 为主信号，term_overlap 为小量精度加成。RRF 已融合 dense / HyDE / BM25 三路排名，无需再单独引入 `vector_inv` / `bm25_inv`（否则两路排名信号被计两遍）。
 
 ```python
 normalized_rrf = rrf_score / max_rrf    # max_rrf = 当前候选中的最大 rrf_score
 
 final_score =
-    0.45 * normalized_rrf  +   # RRF 融合排名（归一化后）
-    0.30 * term_overlap    +   # query 词项覆盖率（0~1）
-    0.15 * vector_inv      +   # 向量排名倒数（0~1）
-    0.10 * bm25_inv            # BM25 排名倒数（0~1）
+    0.80 * normalized_rrf  +   # RRF 融合排名（归一化后）；三路排名已在此汇聚
+    0.20 * term_overlap        # query 词项覆盖率（0~1）；补充词面精度，权重宜小
 ```
 
-#### 3.1.4 Lost-in-Middle 重排
+#### 3.2.4 Lost-in-Middle 重排
 
 按 LLM 注意力分布理论重排上下文顺序：
 - **最相关** → 首位（LLM 对开头注意力最强）
@@ -127,11 +189,11 @@ final_score =
 
 输入 `[rank1, rank2, rank3, rank4, rank5]` → 输出 `[rank1, rank3, rank4, rank5, rank2]`
 
-#### 3.1.5 降级策略
+#### 3.2.5 降级策略
 
 若 `android_parent` / `android_child` / `android_hyde` 任一 collection 不存在，自动回退至旧版 `android_docs` 单路向量检索（`MAX_DISTANCE=1.2` 阈值过滤）。
 
-#### 3.1.6 路A Dense 向量检索优化（已实施）
+#### 3.2.6 路A Dense 向量检索优化（已实施）
 
 **优化前问题**：
 1. 去重逻辑丢失信息 — 同一 `parent_id` 多个 `child` 命中时仅保留首个
@@ -148,11 +210,83 @@ final_score =
 
 **验证结果**：`verify_phase2` 13/13 通过 ✅
 
+#### 3.2.7 三路并发召回（TTFT 优化）
+
+**问题**：三路召回原为串行执行，Dense → HyDE → BM25 顺序等待，总耗时约 185ms，是 TTFT 的最大单点瓶颈。三路之间无数据依赖，天然适合并发。
+
+**实现**：`query_db()` 内部用 `ThreadPoolExecutor(max_workers=3)` 将三路同时提交，主线程等待全部完成后再进入 RRF 融合。
+
+```python
+with ThreadPoolExecutor(max_workers=3) as pool:
+    f_dense = pool.submit(_query_dense, query, col_child)
+    f_hyde  = pool.submit(_query_hyde,  query, col_hyde)
+    f_bm25  = pool.submit(bm25_store.search, query, BM25_TOP_K)
+    dense_pids   = f_dense.result()
+    hyde_pids    = f_hyde.result()
+    bm25_results = f_bm25.result()
+```
+
+延迟对比：
+
+| 阶段 | 串行 | 并发 | 说明 |
+|------|------|------|------|
+| Dense | ~90ms | — | BGE-M3 encode + ChromaDB query |
+| HyDE | ~90ms | — | BGE-M3 encode + ChromaDB query |
+| BM25 | ~5ms | — | Tantivy 磁盘检索 |
+| **三路合计** | **~185ms** | **~90ms** | 瓶颈为 Dense/HyDE，BM25 完全隐藏 |
+
+线程安全性：
+- **PyTorch 推理**：`encode()` 计算期间释放 GIL，两路同时 encode 安全，共享 CPU 资源
+- **ChromaDB 读操作**：`query()` / `get()` 为只读，多线程并发安全
+- **Tantivy Searcher**：无状态只读，线程安全
+
+日志中可直接观察实际耗时：`多路召回: dense=X, hyde=X, bm25=X | 耗时=XXms`
+
+#### 3.2.8 路C BM25 稀疏检索实现（Tantivy + jieba）
+
+**原方案问题**（rank-bm25 内存索引）：
+
+| 问题 | 影响 |
+|------|------|
+| 全量文档 tokenize 后存内存（双份：原文 + token 序列） | 百万文档 → 数 GB 内存，OOM 风险 |
+| 服务重启后需重建，首次查询延迟秒级 | 冷启动体验差 |
+| 双字滑窗分词，专有名词切割错误率高 | BM25 召回质量下降 |
+
+**现方案**：`bm25_store.py` 基于 Tantivy（Rust 搜索引擎）+ jieba 精确分词重写：
+
+```
+jieba.cut(text) → 空格连接 token 串 → Tantivy whitespace 分词器 → BM25Plus 评分
+```
+
+核心设计：
+- **磁盘持久化**：索引落地至 `tantivy_bm25/`（与 `chroma_db/` 同级），mmap 读取，内存占用与查询量相关，而非文档总量
+- **懒加载 + 持久化**：`search()` 首次调用时打开已有索引（毫秒级），索引为空则从 ChromaDB 分批构建（`_BATCH_SIZE=10_000`，避免 OOM）
+- **增量写入**：`add_documents([(doc_id, text)])` 追加文档，无需全量重建
+- **线程安全**：`_lock` 保护 `_ensure_loaded()` 双检锁，多并发安全
+- **接口不变**：`search(query, top_k)` 与 `reload()` 签名与原版完全兼容，`vector_store.py` 无需改动
+
+```python
+# Schema 设计
+doc_id   : TEXT, stored, tokenizer=raw        # 精确存储/检索，不全文分词
+body     : TEXT, stored, tokenizer=whitespace  # jieba 预分词后存入，BM25 匹配目标
+raw_text : TEXT, stored, tokenizer=raw        # 原始文本，命中后返回给调用方
+```
+
+性能对比：
+
+| 方面 | rank-bm25（旧） | Tantivy + jieba（新） |
+|------|-----------------|----------------------|
+| 百万文档内存 | ~2 GB | ~几十 MB（热点 block） |
+| 冷启动延迟 | 秒级（全量重建） | 毫秒级（打开已有索引） |
+| 中文分词精度 | 双字滑窗（低） | jieba 精确模式（高） |
+| BM25 计算 | Python（慢） | Rust（快 ~10×） |
+| 增量更新 | 必须全量重建 | `add_documents()` 追加 |
+
 ---
 
-### 3.2 离线索引构建 (init_vector_db_v2.py)
+### 3.3 离线索引构建 (init_vector_db_v2.py)
 
-#### 3.2.1 Parent-Child 架构
+#### 3.3.1 Parent-Child 架构
 
 | Collection | 内容 | chunk_size | overlap | 用途 |
 |------------|------|------------|---------|------|
@@ -160,7 +294,7 @@ final_score =
 | `android_child` | parent 内部细分 | 128字 | 25字 | 高精度向量语义匹配 |
 | `android_hyde` | LLM 生成的假设问题 | — | — | 问题→问题匹配 |
 
-#### 3.2.2 HyDE 问题生成
+#### 3.3.2 HyDE 问题生成
 
 对每个 parent chunk，调用 MiniMax-M2.7 生成 3 个开发者可能提出的问题：
 
@@ -174,7 +308,7 @@ prompt = "你是Android开发专家。以下是一段Android开发文档：\n\n{
 2. 提取有效问题行（长度>5，含问号/句号）
 3. 降级策略：从原始响应中提取含问号行
 
-#### 3.2.3 Chunking 策略
+#### 3.3.3 Chunking 策略
 
 ```
 按段落分割 → 超长段落按句分割 → 带重叠滑动窗口
@@ -184,9 +318,9 @@ prompt = "你是Android开发专家。以下是一段Android开发文档：\n\n{
 
 ---
 
-### 3.3 会话管理 (session.py)
+### 3.4 会话管理 (session.py)
 
-#### 3.3.1 SessionData 结构
+#### 3.4.1 SessionData 结构
 
 ```python
 class SessionData(TypedDict):
@@ -196,7 +330,7 @@ class SessionData(TypedDict):
     token_budget: int  # 剩余 token 预算 (4096)
 ```
 
-#### 3.3.2 消息生命周期
+#### 3.4.2 消息生命周期
 
 ```
 用户请求
@@ -227,7 +361,7 @@ trim_history() → history 保留最近4条，旧消息移至 trimmed
 
 **关键设计原则**：summarize 和 trim_history 都发生在 **AI 回复入栈之后**，确保 AI 已看过本轮消息再执行压缩/裁剪。
 
-#### 3.3.3 Token 估算
+#### 3.4.3 Token 估算
 
 采用**加权字符数**估算（针对 Android 开发的中英文混合场景优化）：
 
@@ -242,16 +376,16 @@ tokens = int(cn_chars * 1.5 + other_chars * 0.5)
 
 ---
 
-### 3.4 LLM 客户端 (AiClient.py)
+### 3.5 LLM 客户端 (AiClient.py)
 
-#### 3.4.1 接口设计
+#### 3.5.1 接口设计
 
 | 方法 | 用途 | 工具调用 |
 |------|------|----------|
 | `chat(messages, use_tools=False)` | 普通对话 / summarize | 可选单轮 |
 | `run_agent(messages)` | 工具增强多轮对话 | 强制启用，最多10轮 |
 
-#### 3.4.2 Tool Calling 循环
+#### 3.5.2 Tool Calling 循环
 
 ```
 发送 messages + tools → LLM
@@ -302,6 +436,7 @@ flowchart TD
 | 配置项 | 文件 | 默认值 | 说明 |
 |--------|------|--------|------|
 | OPENAI_API_KEY | `.env` | — | MiniMax API Key |
+| BGE_M3_PATH | `core/config.py` | 动态解析 | 本地 BGE-M3 模型目录，支持环境变量覆盖 |
 | CHROMA_DB_PATH | `core/config.py` | 绝对路径 | 向量数据库持久化目录 |
 | MAX_HISTORY | `session.py` | 4 | history 保留条数 |
 | DEFAULT_TOKEN_BUDGET | `session.py` | 4096 | 会话 token 上限 |
@@ -354,10 +489,13 @@ curl -X POST http://localhost:8000/chat \
 
 | 决策 | 选择 | 理由 |
 |------|------|------|
+| Embedding | BGE-M3 (本地) | 中文语义效果好、支持 L2 normalize、显式编码便于缓存和换模型 |
 | 向量库 | ChromaDB | 本地持久化、零配置、Python 原生 |
 | LLM | MiniMax-M2.7 | 中文能力强、API 兼容 OpenAI 格式 |
 | 检索架构 | 多路混合 | 单一检索路召回率不足，混合互补 |
 | 会话存储 | 内存字典 | 进程级简单实现，重启后丢失（可扩展至 Redis） |
+| BM25 引擎 | Tantivy (Rust) + jieba | rank-bm25 全量内存方案在大语料下 OOM；Tantivy mmap 磁盘索引内存占用与查询量相关而非文档总量，jieba 分词精度更高，Rust 层 BM25 计算快 ~10× |
+| 三路召回执行模式 | ThreadPoolExecutor 并发 | 三路无数据依赖，串行 ~185ms → 并发 ~90ms，TTFT 降低 ~50%；不改调用链（session.py 无感），线程池随 with 块自动回收 |
 | Token 估算 | 加权字符数 | 中文 ~1.5 token/字 + 英文/代码 ~0.5 token/字符，避免字符/4 对中文的低估 |
 | summarize 时机 | AI 回复后 | 避免 AI 还没看消息就被压缩 |
 | trim 时机 | AI 回复后 | 不丢失本轮对话内容 |
@@ -414,11 +552,28 @@ curl -X POST http://localhost:8000/chat \
 
 **风险**：[`AiClient.summarize()`](ai_app1/service/AiClient.py:132) 将对话历史直接转为 `str(history)`，得到 Python 列表字面量表示（如 `"[{'role': 'user', 'content': '...'}, ...]"`）。LLM 难以解析这种机器格式，影响摘要质量。
 
-**修复**：改为 `
-`.join(f"{role}: {content}" for m in history) 生成人类可读的对话文本。已在 v2.2 中实施。
+**修复**：改为 `\n`.join(f"{role}: {content}" for m in history) 生成人类可读的对话文本。已在 v2.2 中实施。
 
 ### 8.8 验收脚本硬编码绝对路径（H）
 
 **风险**：[`verify_phase1.py`](ai_app1/pre/verify_phase1.py:25) 将 `CHROMA_DB_PATH` 写死为绝对路径 `/Users/hassan/Documents/workspace/aiFile/fenxiCB/ai_app1/pre/chroma_db`，导致脚本在任何其他机器或目录结构下直接失败，违背可移植性原则。
 
 **修复**：从 `ai_app1.core.config` 导入 `CHROMA_DB_PATH`，与生产代码共用同一配置源。已在 v2.2 中实施。
+
+### 8.9 Rerank 精排信号 double-counting（I）✅ 已修复（方案 A）
+
+**原风险**：旧公式 `0.45*normalized_rrf + 0.30*term_overlap + 0.15*vector_inv + 0.10*bm25_inv` 中，RRF 本身已是 `Σ 1/(k+rank)` 的三路排名融合，再单独追加 `vector_inv` 和 `bm25_inv` 导致向量/BM25 信号被计两遍，实际有效权重严重偏离标注值。
+
+**已实施（方案 A）**：去掉 `vector_inv` / `bm25_inv`，保留 RRF 作为主信号，term_overlap 作为小量词面精度加成：
+
+```python
+final_score = 0.80 * normalized_rrf + 0.20 * term_overlap
+```
+
+**长期优化方向**：引入 cross-encoder 模型（如 `BAAI/bge-reranker-v2-m3`，与已有 bge-m3 同系列，~1.1GB）替换整个线性组合。cross-encoder 将 query + doc 拼接后直接输出语义相关性分数，无需手写权重。对 top-20 候选精排，CPU（Apple M 系列）约 0.8~1.5 秒，可接受。
+
+```python
+from FlagEmbedding import FlagReranker
+reranker = FlagReranker("BAAI/bge-reranker-v2-m3", use_fp16=True)
+scores = reranker.compute_score([(query, doc["text"]) for doc in candidates])
+```

@@ -516,6 +516,44 @@
     let firstTokenTime = null;
     let charCount = 0;
     let text = '';
+    let renderQueue = [];
+    let isRendering = false;
+
+    function enqueueChars(str) {
+      for (const ch of str) {
+        renderQueue.push(ch);
+      }
+      if (!isRendering) {
+        isRendering = true;
+        requestAnimationFrame(renderLoop);
+      }
+    }
+
+    function renderLoop() {
+      // 动态 batch：队列长时加速，短时减速，保证流畅
+      const batchSize = renderQueue.length > 100 ? 8 : (renderQueue.length > 30 ? 4 : 2);
+      let i = 0;
+      while (renderQueue.length > 0 && i < batchSize) {
+        text += renderQueue.shift();
+        i++;
+      }
+      bubble.textContent = text;
+      scrollBottom();
+      if (renderQueue.length > 0) {
+        requestAnimationFrame(renderLoop);
+      } else {
+        isRendering = false;
+      }
+    }
+
+    function flushRender() {
+      while (renderQueue.length > 0) {
+        text += renderQueue.shift();
+      }
+      bubble.textContent = text;
+      scrollBottom();
+      isRendering = false;
+    }
 
     try {
       const resp = await fetch(`${apiUrl}/chat`, {
@@ -559,12 +597,11 @@
           setStatus('online', `首字 ${fmt(ttft)}`);
         }
 
-        text += chunk;
         charCount += chunk.length;
-        bubble.textContent = text;
-        scrollBottom();
+        enqueueChars(chunk);
       }
 
+      flushRender();
       clearInterval(timerInterval);
 
       const totalMs = performance.now() - sendTime;
@@ -575,6 +612,7 @@
       setStatus('online', `完成 · 耗时 ${fmt(totalMs)}`);
 
     } catch (err) {
+      flushRender();
       bubble.remove();
       metricsBar.remove();
       appendError(err.message || String(err));

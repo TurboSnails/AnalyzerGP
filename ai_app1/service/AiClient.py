@@ -70,46 +70,68 @@ class AiClient:
     async def stream_run_agent(self, messages: list):
         """
         流式工具增强型对话入口，内部自动处理多轮工具调用循环。
-        每轮 tool_calls 执行后继续流式输出，最终返回所有 token chunks。
+        每轮在流式响应中直接收集 tool_calls，避免额外非流式请求导致的延迟。
         """
         MAX_STEPS = 10
 
         for step in range(MAX_STEPS):
             full = ""
-            async for token in self._stream_response(messages, use_tools=True):
-                full += token
-                yield token
+            tool_calls: list[dict] = []
 
-            if not full:
-                break
-
-            # 检查是否有新的 tool_calls
             response = await self.client.chat.completions.create(
                 model="MiniMax-M2.7",
                 messages=messages,
                 tools=aiTools,
+                stream=True,
             )
-            msg = response.choices[0].message
-            tool_calls = getattr(msg, "tool_calls", None)
+
+            async for chunk in response:
+                if not chunk.choices:
+                    continue
+                delta = chunk.choices[0].delta
+
+                if delta.content:
+                    full += delta.content
+                    yield delta.content
+
+                # 增量收集 tool_calls（流式中直接获取，省去第二次请求）
+                if delta.tool_calls:
+                    for tc in delta.tool_calls:
+                        idx = getattr(tc, "index", 0)
+                        while len(tool_calls) <= idx:
+                            tool_calls.append({"id": "", "function": {"name": "", "arguments": ""}, "type": "function"})
+                        if tc.id:
+                            tool_calls[idx]["id"] = tc.id
+                        if tc.function and tc.function.name:
+                            tool_calls[idx]["function"]["name"] = tc.function.name
+                        if tc.function and tc.function.arguments:
+                            tool_calls[idx]["function"]["arguments"] += tc.function.arguments
+
+            if not full and not tool_calls:
+                break
 
             if not tool_calls:
                 break
 
             tool_results = []
             for tool_call in tool_calls:
-                func_name = tool_call.function.name
-                func_args = json.loads(tool_call.function.arguments)
+                func_name = tool_call["function"]["name"]
+                func_args = json.loads(tool_call["function"]["arguments"])
                 try:
                     result = TOOL_FUNCTIONS[func_name](**func_args) if func_name in TOOL_FUNCTIONS else f"Unknown tool: {func_name}"
                 except Exception as e:
                     result = f"Error: {str(e)}"
                 tool_results.append({
-                    "tool_call_id": tool_call.id,
+                    "tool_call_id": tool_call["id"],
                     "role": "tool",
                     "content": str(result)
                 })
 
-            messages.append(msg.model_dump())
+            messages.append({
+                "role": "assistant",
+                "content": full,
+                "tool_calls": tool_calls
+            })
             messages.extend(tool_results)
 
     # ─── 非流式对话（兼容保留） ─────────────────────────────────

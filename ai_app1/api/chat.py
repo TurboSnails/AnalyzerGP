@@ -11,6 +11,7 @@ Chat API 路由：处理 /chat POST 请求。
 
 AiClient 使用进程级单例，避免重复创建 OpenAI 客户端实例。
 """
+import asyncio
 import time
 from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
@@ -84,8 +85,28 @@ async def chat(req: ChatRequest, ai_client: AiClient = Depends(get_ai_client)):
     messages = build_messages(session, req.message)
     chat_logger.debug(f"[{req_id}] messages 构建完成: {len(messages)} 条")
 
-    # 3. 流式收集完整回复（用于 summarize 判断），同时流式 yield 给客户端
+    # 3. 流式收集完整回复，同时流式 yield 给客户端
     full_reply_parts: list[str] = []
+
+    async def background_maintain_session():
+        """流结束后在后台执行 summarize / trim，不阻塞用户下一条请求。"""
+        reply = "".join(full_reply_parts)
+        add_assistant_message(session, reply)
+        chat_logger.debug(f"[{req_id}] 助手消息已添加: history_len={len(session['history'])}")
+
+        if should_summarize(session):
+            chat_logger.info(f"[{req_id}] 开始 summarize")
+            try:
+                summary = await ai_client.summarize(session["history"])
+                update_summary(session, summary)
+                chat_logger.info(f"[{req_id}] summarize 完成: summary_len={len(summary)}")
+            except Exception as e:
+                chat_logger.error(f"[{req_id}] summarize 失败: {e}")
+        else:
+            chat_logger.debug(f"[{req_id}] 跳过 summarize: should_summarize=False")
+
+        trim_history(session)
+        chat_logger.debug(f"[{req_id}] trim_history 完成: history_len={len(session['history'])}, trimmed_len={len(session['trimmed'])}")
 
     async def content_generator():
         nonlocal messages
@@ -94,23 +115,11 @@ async def chat(req: ChatRequest, ai_client: AiClient = Depends(get_ai_client)):
                 full_reply_parts.append(chunk)
                 yield chunk
 
-        # 流式结束后更新 session（保证 summarize 在 AI 回复之后触发）
-        reply = "".join(full_reply_parts)
-        add_assistant_message(session, reply)
-        chat_logger.debug(f"[{req_id}] 助手消息已添加: history_len={len(session['history'])}")
-
-        if should_summarize(session):
-            chat_logger.info(f"[{req_id}] 开始 summarize")
-            summary = await ai_client.summarize(session["history"])
-            update_summary(session, summary)
-            chat_logger.info(f"[{req_id}] summarize 完成: summary_len={len(summary)}")
-        else:
-            chat_logger.debug(f"[{req_id}] 跳过 summarize: should_summarize=False")
-
-        trim_history(session)
-        chat_logger.debug(f"[{req_id}] trim_history 完成: history_len={len(session['history'])}, trimmed_len={len(session['trimmed'])}")
-
+        # 流结束后立即关闭连接，让用户可以继续发下一条
         elapsed = time.monotonic() - start
-        chat_logger.info(f"[{req_id}] 请求处理完成: 总耗时={elapsed:.2f}")
+        chat_logger.info(f"[{req_id}] 流式传输完成: 总耗时={elapsed:.2f}")
+
+        # 启动后台任务维护 session（此时 full_reply_parts 已收集完毕）
+        asyncio.create_task(background_maintain_session())
 
     return StreamingResponse(content_generator(), media_type="text/plain")

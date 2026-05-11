@@ -15,6 +15,8 @@
 from __future__ import annotations
 
 import logging
+import time
+from concurrent.futures import ThreadPoolExecutor, Future
 import chromadb
 from ai_app1.core.config import CHROMA_DB_PATH
 from ai_app1.service.embedding import get_embedding_service
@@ -176,14 +178,20 @@ def query_db(query: str) -> str | None:
         logger.warning("v2 collections 未就绪，回退旧版单路检索（请运行 init_vector_db_v2.py）")
         return _legacy_query(query)
 
-    # ── 多路召回 ──────────────────────────────────────────────────────────────
-    dense_pids = _query_dense(query, col_child)
-    hyde_pids = _query_hyde(query, col_hyde)
-    bm25_results = bm25_store.search(query, top_k=BM25_TOP_K)
+    # ── 多路召回（并发）────────────────────────────────────────────────────────
+    t0 = time.perf_counter()
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        f_dense: Future = pool.submit(_query_dense, query, col_child)
+        f_hyde:  Future = pool.submit(_query_hyde,  query, col_hyde)
+        f_bm25:  Future = pool.submit(bm25_store.search, query, BM25_TOP_K)
+        dense_pids   = f_dense.result()
+        hyde_pids    = f_hyde.result()
+        bm25_results = f_bm25.result()
     bm25_pids = [r[0] for r in bm25_results]
 
     logger.info(
         f"多路召回: dense={len(dense_pids)}, hyde={len(hyde_pids)}, bm25={len(bm25_pids)}"
+        f" | 耗时={1000*(time.perf_counter()-t0):.0f}ms"
     )
 
     # ── RRF 融合 ──────────────────────────────────────────────────────────────
