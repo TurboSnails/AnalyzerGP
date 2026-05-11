@@ -217,11 +217,13 @@ class HfSnapshotDownloader:
         *,
         slim_ignore: Sequence[str] | None = None,
         endpoint: str | None = None,
+        token: str | bool | None = None,
     ) -> None:
         self.repo_id = repo_id
         self.local_dir = local_dir.expanduser().resolve()
         self._slim_ignore = tuple(slim_ignore) if slim_ignore is not None else None
         self._endpoint_override = endpoint
+        self._token = token
 
     @classmethod
     def from_preset(cls, preset_key: str, models_parent: Path, *, endpoint: str | None = None) -> HfSnapshotDownloader:
@@ -296,7 +298,7 @@ class HfSnapshotDownloader:
             max_workers=workers,
             ignore_patterns=self._ignore_for_slim(slim),
             etag_timeout=etag_timeout,
-            token=_hf_token_for_snapshot(),
+            token=_hf_token_for_snapshot() if self._token is None else self._token,
             tqdm_class=_LiveHubTqdm,
             force_download=force,
         )

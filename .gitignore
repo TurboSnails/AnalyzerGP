@@ -116,3 +116,5 @@ env/
 /ai_app1/pre/tantivy_bm25/952bae7412784fdc807a503e32af2465.term
 /ai_app1/pre/tantivy_bm25/meta.json
 /models/bge-m3/pytorch_model.bin
+/ai_app1/pre/tantivy_bm25/
+/ai_app1/models/bge-reranker-base/

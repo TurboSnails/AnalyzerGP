@@ -244,6 +244,7 @@ def query_db(query: str) -> str | None:
     for r in reranked:
         logger.info(
             f"  [{r['id']}] final={r['final_score']:.3f} "
+            f"ce={r.get('ce_score', 0.0):.3f} "
             f"rrf={r['rrf_score']:.4f} v_rank={r['vector_rank']} "
             f"b_rank={r['bm25_rank']} | {r['text'][:50]!r}"
         )
