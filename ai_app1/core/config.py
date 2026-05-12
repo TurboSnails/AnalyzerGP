@@ -45,3 +45,22 @@ def _resolve_reranker_path() -> str:
 # ─── CrossEncoder Reranker 模型 ─────────────────────────────────────────────
 # 优先本地路径；否则从 HuggingFace Hub 自动下载
 RERANKER_MODEL = os.getenv("RERANKER_MODEL", "").strip() or _resolve_reranker_path()
+
+
+def _resolve_query_rewriter_path() -> str:
+    """优先使用本地已下载的 Qwen2.5-1.5B-Instruct，避免网络依赖。"""
+
+    def has_weights(directory: str) -> bool:
+        return os.path.isfile(os.path.join(directory, "pytorch_model.bin")) or os.path.isfile(
+            os.path.join(directory, "model.safetensors")
+        )
+
+    for base in (_REPO_ROOT, _AI_APP_ROOT):
+        candidate = os.path.join(base, "models", "qwen2.5-1.5b-instruct")
+        if os.path.isdir(candidate) and has_weights(candidate):
+            return candidate
+    return "Qwen/Qwen2.5-1.5B-Instruct"
+
+
+# ─── Query Rewriter 模型（Qwen2.5-1.5B-Instruct） ────────────────────────────
+QUERY_REWRITER_MODEL = os.getenv("QUERY_REWRITER_MODEL", "").strip() or _resolve_query_rewriter_path()

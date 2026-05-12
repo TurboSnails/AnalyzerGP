@@ -20,6 +20,7 @@ from concurrent.futures import ThreadPoolExecutor, Future
 import chromadb
 from ai_app1.core.config import CHROMA_DB_PATH
 from ai_app1.service.embedding import get_embedding_service
+from ai_app1.service.query_rewriter import RewriteQuery
 
 logger = logging.getLogger("vector_store")
 
@@ -63,15 +64,19 @@ def _get_collection(name: str):
 
 # ─── RRF 融合 ─────────────────────────────────────────────────────────────────
 
-def _rrf_merge(ranked_lists: list[list[str]]) -> list[tuple[str, float]]:
+def _rrf_merge(ranked_lists: "list[tuple[list[str], float]]") -> list[tuple[str, float]]:
     """
-    Reciprocal Rank Fusion：不依赖原始分值，仅按排名融合多路结果。
-    score(d) = Σ 1/(rank + RRF_K)
+    Weighted Reciprocal Rank Fusion：按权重融合多路结果。
+    score(d) = Σ weight_i / (rank_i + RRF_K)
+
+    weight 由 RewriteQuery.weight 传入：原始 query 权重最高（1.0），
+    扩写变体按 type 递减（semantic=0.9, keyword=0.85, api=0.75~0.80），
+    使原始问题对最终排名的贡献始终最大。
     """
     scores: dict[str, float] = {}
-    for lst in ranked_lists:
+    for lst, weight in ranked_lists:
         for rank, doc_id in enumerate(lst):
-            scores[doc_id] = scores.get(doc_id, 0.0) + 1.0 / (rank + RRF_K)
+            scores[doc_id] = scores.get(doc_id, 0.0) + weight / (rank + RRF_K)
     return sorted(scores.items(), key=lambda x: x[1], reverse=True)
 
 
@@ -160,42 +165,91 @@ def _fetch_parents(parent_ids: list[str], col_parent) -> dict[str, str]:
 
 # ─── 主检索入口 ────────────────────────────────────────────────────────────────
 
-def query_db(query: str) -> str | None:
+def query_db(queries: "list[RewriteQuery] | list[str] | str") -> "str | None":
     """
-    混合检索主入口，与旧版保持相同的对外接口（返回拼接文本或 None）。
+    多查询混合检索主入口（兼容单条 str 调用）。
 
-    内部执行：多路召回 → RRF 融合 → Rerank → Lost-in-Middle 重排
+    queries[0] 为原始用户问题，用于 CrossEncoder Rerank；
+    其余为改写扩展 query，用于扩大三路召回的覆盖范围。
+
+    内部执行：N×3路并发召回 → RRF融合 → Rerank → Lost-in-Middle重排
     """
+    # ── 输入归一化：str / list[str] → list[RewriteQuery] ─────────────────────
+    if isinstance(queries, str):
+        queries = [RewriteQuery(text=queries, type="original", weight=1.0,
+                                routes=["dense", "hyde", "bm25"])]
+    elif queries and isinstance(queries[0], str):
+        # 向后兼容 list[str]：第一条视为 original，其余视为 semantic
+        rq_list: list[RewriteQuery] = []
+        for i, q in enumerate(queries):
+            q = q.strip()
+            if not q:
+                continue
+            if i == 0:
+                rq_list.append(RewriteQuery(text=q, type="original", weight=1.0,
+                                            routes=["dense", "hyde", "bm25"]))
+            else:
+                rq_list.append(RewriteQuery(text=q, type="semantic", weight=0.9,
+                                            routes=["dense", "hyde"]))
+        queries = rq_list
+
+    queries = [rq for rq in queries if rq.text.strip()]
+    if not queries:
+        return None
+
+    original_query = queries[0].text
+
     from ai_app1.service import bm25_store
     from ai_app1.service.reranker import rerank_chunks, reorder_lost_in_middle
 
     col_parent = _get_collection("android_parent")
-    col_child = _get_collection("android_child")
-    col_hyde = _get_collection("android_hyde")
+    col_child  = _get_collection("android_child")
+    col_hyde   = _get_collection("android_hyde")
     v2_ready = all(c is not None for c in [col_parent, col_child, col_hyde])
 
     if not v2_ready:
         logger.warning("v2 collections 未就绪，回退旧版单路检索（请运行 init_vector_db_v2.py）")
-        return _legacy_query(query)
+        return _legacy_query(original_query)
 
-    # ── 多路召回（并发）────────────────────────────────────────────────────────
+    # ── 按路由元数据选择性提交任务（Retrieval Orchestration） ─────────────────
+    # 每条 RewriteQuery 只送往 routes 指定的路径，避免低质量 query 污染所有路径
     t0 = time.perf_counter()
-    with ThreadPoolExecutor(max_workers=3) as pool:
-        f_dense: Future = pool.submit(_query_dense, query, col_child)
-        f_hyde:  Future = pool.submit(_query_hyde,  query, col_hyde)
-        f_bm25:  Future = pool.submit(bm25_store.search, query, BM25_TOP_K)
-        dense_pids   = f_dense.result()
-        hyde_pids    = f_hyde.result()
-        bm25_results = f_bm25.result()
-    bm25_pids = [r[0] for r in bm25_results]
+    weighted_lists: list[tuple[list[str], float]] = []   # (pid_list, weight) for Weighted RRF
+    pid_best_dense_rank: dict[str, int] = {}
+    pid_best_bm25_rank:  dict[str, int] = {}
 
+    n_tasks = sum(len(rq.routes) for rq in queries)
+    with ThreadPoolExecutor(max_workers=max(n_tasks, 1)) as pool:
+        futures: list[tuple[str, float, Future]] = []
+        for rq in queries:
+            if "dense" in rq.routes:
+                futures.append(("dense", rq.weight, pool.submit(_query_dense, rq.text, col_child)))
+            if "hyde" in rq.routes:
+                futures.append(("hyde",  rq.weight, pool.submit(_query_hyde,  rq.text, col_hyde)))
+            if "bm25" in rq.routes:
+                futures.append(("bm25",  rq.weight, pool.submit(bm25_store.search, rq.text, BM25_TOP_K)))
+
+        for kind, weight, f in futures:
+            result = f.result()
+            if kind == "bm25":
+                pids = [r[0] for r in result]
+                for rank, pid in enumerate(pids):
+                    pid_best_bm25_rank[pid] = min(pid_best_bm25_rank.get(pid, 999), rank)
+            else:
+                pids = result
+                if kind == "dense":
+                    for rank, pid in enumerate(pids):
+                        pid_best_dense_rank[pid] = min(pid_best_dense_rank.get(pid, 999), rank)
+            weighted_lists.append((pids, weight))
+
+    route_summary = " | ".join(f"{rq.type}({'+'.join(rq.routes)})" for rq in queries)
     logger.info(
-        f"多路召回: dense={len(dense_pids)}, hyde={len(hyde_pids)}, bm25={len(bm25_pids)}"
+        f"多路召回: {n_tasks} 路 [{route_summary}]"
         f" | 耗时={1000*(time.perf_counter()-t0):.0f}ms"
     )
 
-    # ── RRF 融合 ──────────────────────────────────────────────────────────────
-    rrf_results = _rrf_merge([dense_pids, hyde_pids, bm25_pids])
+    # ── Weighted RRF 融合（按 query 权重加权） ──────────────────────────────────
+    rrf_results = _rrf_merge(weighted_lists)
     rrf_score_map = {pid: score for pid, score in rrf_results}
     top20_ids = [pid for pid, _ in rrf_results[:20]]
     logger.info(
@@ -206,39 +260,27 @@ def query_db(query: str) -> str | None:
     # ── 拉取 parent 文本 ──────────────────────────────────────────────────────
     parent_texts = _fetch_parents(top20_ids, col_parent)
 
-    # ── 构建候选结构 ──────────────────────────────────────────────────────────
+    # ── 构建候选结构（按 RRF 排名顺序，天然去重） ──────────────────────────────
     seen_ids: set[str] = set()
     candidates: list[dict] = []
-
-    for v_rank, pid in enumerate(dense_pids):
-        if pid in parent_texts and pid not in seen_ids:
-            seen_ids.add(pid)
-            candidates.append({
-                "id": pid,
-                "text": parent_texts[pid],
-                "rrf_score": rrf_score_map.get(pid, 0.0),
-                "vector_rank": v_rank,
-                "bm25_rank": bm25_pids.index(pid) if pid in bm25_pids else 999,
-            })
 
     for pid in top20_ids:
         if pid in parent_texts and pid not in seen_ids:
             seen_ids.add(pid)
             candidates.append({
-                "id": pid,
-                "text": parent_texts[pid],
-                "rrf_score": rrf_score_map.get(pid, 0.0),
-                "vector_rank": dense_pids.index(pid) if pid in dense_pids else 999,
-                "bm25_rank": bm25_pids.index(pid) if pid in bm25_pids else 999,
+                "id":          pid,
+                "text":        parent_texts[pid],
+                "rrf_score":   rrf_score_map[pid],
+                "vector_rank": pid_best_dense_rank.get(pid, 999),
+                "bm25_rank":   pid_best_bm25_rank.get(pid, 999),
             })
 
     if not candidates:
-        logger.warning(f"所有路径均无结果: query={query[:30]!r}")
+        logger.warning(f"所有路径均无结果: queries={[q[:20] for q in queries]}")
         return None
 
-    # ── Rerank ────────────────────────────────────────────────────────────────
-    reranked = rerank_chunks(query, candidates, top_k=RERANK_TOP_K)
-    # 强制断言：Rerank 后不允许存在重复的 parent_id（避免上下文污染）
+    # ── Rerank（使用原始问题做 CrossEncoder 语义评分） ─────────────────────────
+    reranked = rerank_chunks(original_query, candidates, top_k=RERANK_TOP_K)
     _rerank_ids = [r["id"] for r in reranked]
     assert len(_rerank_ids) == len(set(_rerank_ids)),         f"Rerank 输出存在重复 parent_id: {_rerank_ids}"
     for r in reranked:
@@ -253,11 +295,8 @@ def query_db(query: str) -> str | None:
     ordered = reorder_lost_in_middle(reranked)
 
     result_text = "\n\n".join(c["text"] for c in ordered)
-    logger.info(
-        f"query_db 完成: {len(ordered)} 个片段, total_len={len(result_text)}"
-    )
+    logger.info(f"query_db 完成: {len(ordered)} 个片段, total_len={len(result_text)}")
     return result_text
-
 
 # ─── 旧版单路降级 ─────────────────────────────────────────────────────────────
 

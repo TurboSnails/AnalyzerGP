@@ -10,7 +10,7 @@ expected_chunk 所对应的证据片段。
   多跳题（expected_chunk 含 " / "）只需命中其中任意一个分支即可。
 
 运行方式：
-    uv run python -m ai_app1.service.evaluate
+    uv run python -m ai_app1.eval.evaluate
 """
 
 import json
@@ -18,7 +18,7 @@ import sys
 import time
 from pathlib import Path
 
-# 兼容直接运行（python evaluate.py）和模块运行（python -m ai_app1.service.evaluate）
+# 兼容直接运行（python evaluate.py）和模块运行（python -m ai_app1.eval.evaluate）
 _PROJECT_ROOT = Path(__file__).parent.parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
