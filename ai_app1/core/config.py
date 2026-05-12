@@ -64,3 +64,34 @@ def _resolve_query_rewriter_path() -> str:
 
 # ─── Query Rewriter 模型（Qwen2.5-1.5B-Instruct） ────────────────────────────
 QUERY_REWRITER_MODEL = os.getenv("QUERY_REWRITER_MODEL", "").strip() or _resolve_query_rewriter_path()
+
+
+# ─── 主答案 LLM 后端 ─────────────────────────────────────────────────────────
+# 通过 LLM_BACKEND 切换：
+#   minimax  → 远程 MiniMax-M2.7（默认，生产）
+#   ollama   → 本地 Ollama（开发/模拟）
+#   openai   → 任意 OpenAI 兼容端点（GPT、DeepSeek、通义等）
+LLM_BACKEND = os.getenv("LLM_BACKEND", "minimax").lower()
+
+_LLM_PRESETS = {
+    "minimax": {
+        "base_url": "https://api.minimaxi.com/v1",
+        "model":    "MiniMax-M2.7",
+        "api_key":  OPENAI_API_KEY or "",
+    },
+    "ollama": {
+        "base_url": "http://127.0.0.1:11434/v1",
+        "model":    "qwen2.5:1.5b-instruct-q4_K_M",
+        "api_key":  "ollama",  # Ollama 不校验 key，给个占位
+    },
+    "openai": {
+        "base_url": os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1"),
+        "model":    os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+        "api_key":  OPENAI_API_KEY or "",
+    },
+}
+
+_preset = _LLM_PRESETS.get(LLM_BACKEND, _LLM_PRESETS["minimax"])
+LLM_BASE_URL = os.getenv("LLM_BASE_URL", "").strip() or _preset["base_url"]
+LLM_MODEL    = os.getenv("LLM_MODEL", "").strip()    or _preset["model"]
+LLM_API_KEY  = os.getenv("LLM_API_KEY", "").strip()  or _preset["api_key"]

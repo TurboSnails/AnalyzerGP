@@ -1,0 +1,149 @@
+[
+  {
+    "_comment": "=== 1. 指代问题（Anaphora）===",
+    "query": "这个为什么会泄漏？",
+    "expected_chunk": "内存防漏",
+    "evidence": "警惕静态变量持有 Context 以及非静态内部类导致的泄露。",
+    "difficulty": "anaphora",
+    "note": "需要结合对话历史理解'这个'指代的是 Handler"
+  },
+  {
+    "query": "上面那个怎么解决？",
+    "expected_chunk": "内存防漏",
+    "evidence": "使用 WeakReference 或静态内部类避免 Handler 持有外部 Activity 引用。",
+    "difficulty": "anaphora",
+    "note": "指代上一轮的 Handler 内存泄漏问题，极短 query"
+  },
+  {
+    "query": "这种写法有什么风险？",
+    "expected_chunk": "线程安全",
+    "evidence": "UI 线程不耗时，耗时任务应放在子线程执行。",
+    "difficulty": "anaphora",
+    "note": "没有明确主语，需要上下文推断"
+  },
+  {
+    "_comment": "=== 2. 模糊问题（Vague / Under-specified）===",
+    "query": "为什么会崩？",
+    "expected_chunk": "线程安全",
+    "evidence": "ANR",
+    "difficulty": "vague",
+    "note": "极度模糊，需匹配到 ANR / crash 相关文档"
+  },
+  {
+    "query": "这玩意怎么优化？",
+    "expected_chunk": "内存防漏 / 布局优化",
+    "evidence": "内存优化、布局层级扁平化",
+    "difficulty": "vague",
+    "note": "口语化，'这玩意'无任何技术语义"
+  },
+  {
+    "query": "出了问题怎么办？",
+    "expected_chunk": "架构解耦",
+    "evidence": "避免 Activity 变成全能管家",
+    "difficulty": "vague",
+    "note": "完全无技术关键词"
+  },
+  {
+    "_comment": "=== 3. 错别字与拼写变异（Typo / Misspelling）===",
+    "query": "Hanlder 泄漏怎么解决",
+    "expected_chunk": "内存防漏",
+    "evidence": "Handler 内存泄漏",
+    "difficulty": "typo",
+    "note": "Handler 拼写错误为 Hanlder，BM25 会失效，考验 Dense 语义容错"
+  },
+  {
+    "query": "Acitvity 生命周期问题",
+    "expected_chunk": "系统适配",
+    "evidence": "Activity",
+    "difficulty": "typo",
+    "note": "Activity 拼写错误"
+  },
+  {
+    "query": "ViewModle 和 LiveData 搭配",
+    "expected_chunk": "架构解耦",
+    "evidence": "ViewModel 将逻辑从 Activity 中抽离",
+    "difficulty": "typo",
+    "note": "ViewModel 拼写错误"
+  },
+  {
+    "_comment": "=== 4. 中英混合（Code-Switching）===",
+    "query": "Compose recomposition 导致卡顿",
+    "expected_chunk": "布局优化",
+    "evidence": "Jetpack Compose 重组",
+    "difficulty": "code_switching",
+    "note": "英文术语 + 中文描述，Dense 需理解 recomposition 语义"
+  },
+  {
+    "query": "Fragment lifecycle 回调里做 network call 安全吗",
+    "expected_chunk": "线程安全",
+    "evidence": "耗时任务应放在子线程执行",
+    "difficulty": "code_switching",
+    "note": "中英混杂，且涉及跨组件概念"
+  },
+  {
+    "query": "RecyclerView Adapter 的 onBindViewHolder 里 setText 很卡",
+    "expected_chunk": "布局优化",
+    "evidence": "布局层级扁平化、避免过度绘制",
+    "difficulty": "code_switching",
+    "note": "含具体方法名 + 中文问题描述"
+  },
+  {
+    "_comment": "=== 5. 超长问题（Long Query / Stacktrace Dump）===",
+    "query": "我的应用崩溃了，日志是这样的：java.lang.NullPointerException: Attempt to invoke virtual method 'void android.widget.TextView.setText(java.lang.CharSequence)' on a null object reference at com.example.MainActivity.onCreate(MainActivity.java:42) at android.app.Activity.performCreate(Activity.java:7009) at android.app.Instrumentation.callActivityOnCreate(Instrumentation.java:1214) 请帮我分析原因",
+    "expected_chunk": "线程安全",
+    "evidence": "NullPointerException",
+    "difficulty": "long_query",
+    "note": "真实场景：用户直接贴 stacktrace，query 长度 >200 字符"
+  },
+  {
+    "query": "我在 Fragment 的 onCreateView 里 inflate 了一个很复杂的布局，里面嵌套了 5 层 LinearLayout，每个里面都有 ImageView 和 TextView，然后在 onViewCreated 里做了网络请求，拿到数据后更新 UI，但是在低配置手机上滑动很卡，有时候会 ANR，请问可能是什么原因，怎么优化？",
+    "expected_chunk": "布局优化 / 线程安全",
+    "evidence": "布局层级扁平化、避免过度绘制、耗时任务放在子线程",
+    "difficulty": "long_query",
+    "note": "超长描述，含多个潜在问题点，需要多维度召回"
+  },
+  {
+    "_comment": "=== 6. 多跳问题（Multi-hop / Cross-domain）===",
+    "query": "ViewModel + Coroutine + Fragment 为什么泄漏",
+    "expected_chunk": "架构解耦 / 内存防漏 / 线程安全",
+    "evidence": "ViewModel 将逻辑抽离；非静态内部类导致内存泄露；耗时任务放在子线程",
+    "difficulty": "multi_hop",
+    "note": "同时涉及 lifecycle、coroutine、fragment、cancellation 四个概念"
+  },
+  {
+    "query": "用了 LiveData 和 Room，但旋转屏幕后数据丢失",
+    "expected_chunk": "架构解耦 / 系统适配",
+    "evidence": "ViewModel 在配置变更时存活；Activity 重建导致数据丢失",
+    "difficulty": "multi_hop",
+    "note": "跨架构组件（LiveData / Room / ViewModel / 配置变更）"
+  },
+  {
+    "query": "Android 13 上通知弹不出来，用了 WorkManager 做后台任务",
+    "expected_chunk": "系统适配 / 线程安全",
+    "evidence": "Android 13+ 通知权限；WorkManager 后台调度",
+    "difficulty": "multi_hop",
+    "note": "权限适配 + 后台任务框架交叉"
+  },
+  {
+    "_comment": "=== 7. 对抗性样本（Adversarial / 高噪声）===",
+    "query": "都说 Kotlin 比 Java 好，那用 Kotlin 写 Android 是不是就不用管内存泄漏了",
+    "expected_chunk": "内存防漏",
+    "evidence": "非静态内部类可能导致内存泄露",
+    "difficulty": "adversarial",
+    "note": "带有错误前提的提问，需要纠正并给出正确知识"
+  },
+  {
+    "query": "我直接用全局单例保存所有 Activity 引用，这样访问起来很快，有什么问题吗",
+    "expected_chunk": "内存防漏",
+    "evidence": "警惕静态变量持有 Context",
+    "difficulty": "adversarial",
+    "note": "用户描述的做法本身就是反模式，系统需要识别出错误"
+  },
+  {
+    "query": "主线程睡 5 秒再更新 UI 应该没问题吧，反正也就 5 秒",
+    "expected_chunk": "线程安全",
+    "evidence": "UI 线程不耗时，耗时任务应放在子线程执行",
+    "difficulty": "adversarial",
+    "note": "用户认为做法合理，需要系统明确指出 ANR 风险"
+  }
+]

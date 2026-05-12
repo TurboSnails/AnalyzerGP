@@ -73,17 +73,23 @@ async def chat(req: ChatRequest, ai_client: AiClient = Depends(get_ai_client)):
 
     user_id = "default_user"
 
-    # 获取或创建会话
+    t_session = time.monotonic()
     session = get_session(user_id)
     chat_logger.debug(f"[{req_id}] 获取 session: history_len={len(session['history'])}, summary={'有' if session['summary'] else '无'}")
 
-    # 1. 用户消息入栈
     add_user_message(session, req.message)
     chat_logger.debug(f"[{req_id}] 用户消息已添加: history_len={len(session['history'])}")
 
-    # 2. 构建发送给 LLM 的完整消息列表（query_db 含模型推理，放入线程池避免阻塞事件循环）
+    t_before_build = time.monotonic()
     messages = await asyncio.to_thread(build_messages, session, req.message)
-    chat_logger.debug(f"[{req_id}] messages 构建完成: {len(messages)} 条")
+    t_after_build = time.monotonic()
+    prompt_chars = sum(len(str(m.get("content", ""))) for m in messages)
+    chat_logger.info(
+        f"[{req_id}] 本地耗时分解: session={1000*(t_before_build-t_session):.0f}ms, "
+        f"build_messages={1000*(t_after_build-t_before_build):.0f}ms, "
+        f"本地总={1000*(t_after_build-start):.0f}ms, "
+        f"prompt_chars={prompt_chars}, msgs={len(messages)}"
+    )
 
     # 3. 流式收集完整回复，同时流式 yield 给客户端
     full_reply_parts: list[str] = []
@@ -110,12 +116,20 @@ async def chat(req: ChatRequest, ai_client: AiClient = Depends(get_ai_client)):
 
     async def content_generator():
         nonlocal messages
+        t_before_llm = time.monotonic()
+        chat_logger.info(f"[{req_id}] 即将调 LLM: 本地准备耗时={1000*(t_before_llm-start):.0f}ms")
+        first_chunk_logged = False
         async for chunk in ai_client.stream_run_agent(messages):
             if chunk:
+                if not first_chunk_logged:
+                    chat_logger.info(
+                        f"[{req_id}] 收到 LLM 首字: TTFT(端到端)={1000*(time.monotonic()-t_before_llm):.0f}ms, "
+                        f"距请求到达={1000*(time.monotonic()-start):.0f}ms"
+                    )
+                    first_chunk_logged = True
                 full_reply_parts.append(chunk)
                 yield chunk
 
-        # 流结束后立即关闭连接，让用户可以继续发下一条
         elapsed = time.monotonic() - start
         chat_logger.info(f"[{req_id}] 流式传输完成: 总耗时={elapsed:.2f}")
 

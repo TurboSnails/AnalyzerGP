@@ -29,12 +29,11 @@ async def preload_models():
     from ai_app1.service.embedding import get_embedding_service
     from ai_app1.service.reranker import _get_reranker_service
     from ai_app1.service.bm25_store import search as bm25_search
-
-    from ai_app1.service.query_rewriter import _get_service as _get_rewriter_service
+    from ai_app1.service.query_rewriter import preload as preload_rewriter
 
     await asyncio.to_thread(get_embedding_service()._ensure_model)
     await asyncio.to_thread(_get_reranker_service()._ensure_model)
-    await asyncio.to_thread(_get_rewriter_service()._ensure_model)
+    await asyncio.to_thread(preload_rewriter)
     # 触发 BM25 索引加载（空查询会快速返回，但会完成索引初始化）
     await asyncio.to_thread(bm25_search, "", 1)
 
@@ -44,3 +43,10 @@ async def preload_models():
 @app.get("/")
 def root():
     return FileResponse(_static / "index.html")
+
+
+@app.get("/debug/rewrite_cache")
+def debug_rewrite_cache():
+    """暴露 rewrite LRU 缓存命中统计，用于调优 Rewrite Router 阈值。"""
+    from ai_app1.service.query_rewriter import cache_stats
+    return cache_stats()

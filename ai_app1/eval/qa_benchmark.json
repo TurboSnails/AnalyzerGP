@@ -1,0 +1,128 @@
+[
+  {
+    "query": "为什么我的 Activity 总是报内存泄露，有哪些常见的坑需要避开？",
+    "expected_answer": "Android 中 Activity 内存泄漏主要源于长生命周期对象持有了 Activity 的强引用。常见坑包括：(1) 静态变量直接或间接持有 Context/Activity；(2) 非静态内部类（如 Handler、AsyncTask）隐式持有外部类引用；(3) 未取消的定时器、监听器或回调注册；(4) Bitmap 等大对象未回收。解决思路是使用 WeakReference、静态内部类 + WeakReference、及时 unregister 回调，以及在 onDestroy 中清理资源。",
+    "key_points": [
+      "静态变量持有 Context",
+      "非静态内部类",
+      "Handler 泄漏",
+      "未及时 unregister",
+      "WeakReference",
+      "onDestroy 清理"
+    ],
+    "difficulty": "standard"
+  },
+  {
+    "query": "在 Android 架构设计中，为了避免 Activity 逻辑过于臃肿，官方推荐的最佳实践是什么？",
+    "expected_answer": "官方推荐采用 MVVM 架构配合 Jetpack 组件。核心做法是将业务逻辑从 Activity/Fragment 中抽离到 ViewModel，ViewModel 在配置变更（如旋转屏幕）时存活，避免数据丢失。UI 层通过 LiveData/StateFlow 观察数据变化，实现响应式更新。数据层使用 Repository 模式封装 Room、Retrofit 等数据源，进一步解耦。",
+    "key_points": [
+      "MVVM",
+      "ViewModel",
+      "LiveData",
+      "Repository 模式",
+      "配置变更存活",
+      "逻辑抽离"
+    ],
+    "difficulty": "standard"
+  },
+  {
+    "query": "我正在处理一个网络请求，可以直接在主线程拿到结果后更新 TextView 吗？",
+    "expected_answer": "不可以。Android 主线程（UI 线程）负责界面绘制与事件响应，如果在主线程执行网络请求等耗时操作，会导致界面卡顿甚至触发 ANR（Application Not Responding）。正确做法是将网络请求放在子线程（如 Kotlin Coroutine、RxJava、ThreadPoolExecutor）执行，拿到结果后通过 Handler、runOnUiThread、LiveData 或 Flow 切换回主线程更新 UI。",
+    "key_points": [
+      "主线程不能耗时",
+      "ANR",
+      "子线程",
+      "Coroutine",
+      "切换回主线程更新 UI"
+    ],
+    "difficulty": "standard"
+  },
+  {
+    "query": "ViewModel 在 MVVM 模式中扮演的具体角色是什么？",
+    "expected_answer": "ViewModel 是 MVVM 中的'视图模型'层，负责为 UI 层（Activity/Fragment）准备和管理数据。它持有业务逻辑，暴露 LiveData/StateFlow 供 UI 观察；在配置变更（如旋转）时由系统保留实例，避免数据丢失；不持有 View 引用，防止内存泄漏。ViewModel 通过调用 Repository 获取数据，实现 UI 与数据源的解耦。",
+    "key_points": [
+      "视图模型层",
+      "管理数据",
+      "配置变更存活",
+      "不持有 View 引用",
+      "LiveData/StateFlow",
+      "Repository"
+    ],
+    "difficulty": "standard"
+  },
+  {
+    "query": "Handler 为什么会内存泄漏，怎么解决？",
+    "expected_answer": "Handler 内存泄漏的原因是：非静态内部类 Handler 隐式持有外部 Activity 的引用，如果 Handler 中仍有未执行完的消息或延时任务（postDelayed），即使 Activity 已经 finish，GC 也无法回收 Activity，导致泄漏。解决方案：(1) 将 Handler 定义为静态内部类；(2) 使用 WeakReference 弱引用持有 Activity；(3) 在 Activity onDestroy 中移除所有消息和回调 removeCallbacksAndMessages(null)。",
+    "key_points": [
+      "非静态内部类持有外部引用",
+      "postDelayed 延时消息",
+      "静态内部类",
+      "WeakReference",
+      "removeCallbacksAndMessages"
+    ],
+    "difficulty": "standard"
+  },
+  {
+    "query": "Jetpack Compose 中频繁重组（recomposition）导致卡顿，应该如何优化？",
+    "expected_answer": "Compose 重组优化可以从以下几个方面入手：(1) 使用 remember/derivedStateOf 缓存计算结果，避免重复计算；(2) 将频繁变化的状态提升到最近公共祖先，减少重组范围（稳定性）；(3) 使用 key 控制列表项重组粒度；(4) 避免在 composable 中创建匿名对象（如 lambda 捕获不稳定变量）；(5) 使用 @Stable/@Immutable 注解提升类型稳定性；(6) 对于大量数据列表，使用 LazyColumn 并开启 item key。",
+    "key_points": [
+      "remember",
+      "derivedStateOf",
+      "状态提升",
+      "key",
+      "@Stable/@Immutable",
+      "LazyColumn"
+    ],
+    "difficulty": "advanced"
+  },
+  {
+    "query": "Android 13+ 通知权限变更对现有应用有什么影响？",
+    "expected_answer": "从 Android 13（API 33）开始，应用发送通知需要显式申请 POST_NOTIFICATIONS 运行时权限。如果用户拒绝，应用仍然可以创建通知渠道，但通知不会显示。影响包括：(1) 升级 targetSdkVersion 到 33+ 后必须在 AndroidManifest 声明权限；(2) 需要在应用首次启动时引导用户授权；(3) 已有通知功能需增加权限检查与降级策略（如用 Snackbar/Toast 替代）。",
+    "key_points": [
+      "POST_NOTIFICATIONS 权限",
+      "Android 13 API 33",
+      "运行时权限申请",
+      "AndroidManifest 声明",
+      "权限拒绝降级"
+    ],
+    "difficulty": "advanced"
+  },
+  {
+    "query": "ViewModel + Coroutine + Fragment 为什么还会泄漏？",
+    "expected_answer": "虽然 ViewModel 本身设计为配置变更存活且不持有 View 引用，但在以下场景仍会泄漏：(1) ViewModel 中启动的 Coroutine 若引用了 Application/Context 以外的外部对象，且未在 onCleared 中取消；(2) 使用 viewModelScope 时，如果 Fragment 被销毁但 Coroutine 仍在执行阻塞/延时操作，可能导致关联资源无法释放；(3) Fragment 中通过 Fragment.viewLifecycleOwner.lifecycleScope 启动的协程若持有 ViewModel 中的 LiveData observeForever 未移除。正确做法是在 ViewModel.onCleared 中取消所有协程，Fragment 中使用 viewLifecycleOwner 而非 lifecycleOwner 观察 LiveData。",
+    "key_points": [
+      "Coroutine 未取消",
+      "onCleared",
+      "viewModelScope",
+      "viewLifecycleOwner",
+      "observeForever",
+      "阻塞操作"
+    ],
+    "difficulty": "hard"
+  },
+  {
+    "query": "Room 数据库在主线程查询为什么会崩溃，官方推荐怎么做？",
+    "expected_answer": "Room 默认禁止主线程数据库操作，查询会抛出 IllegalStateException('Cannot access database on the main thread since it may potentially lock the UI for a long period')。官方推荐做法：(1) 使用 Kotlin Coroutine + suspend 函数配合 Room DAO；(2) 返回 LiveData/Flow 让 Room 自动在后台线程执行并推送结果；(3) 使用 RxJava 的 Single/Flowable；(4) 若必须同步执行，可在构建 RoomDatabase 时调用 allowMainThreadQueries()，但仅建议测试使用。",
+    "key_points": [
+      "IllegalStateException",
+      "主线程禁止查询",
+      "suspend 函数",
+      "LiveData/Flow",
+      "allowMainThreadQueries"
+    ],
+    "difficulty": "standard"
+  },
+  {
+    "query": "RecyclerView 滚动卡顿，可能有哪些原因，怎么排查？",
+    "expected_answer": "RecyclerView 卡顿常见原因及排查方法：(1) onBindViewHolder 中做耗时操作（如图片解码、计算）→ 移入后台线程；(2) 布局过度绘制或层级过深→ 使用 Layout Inspector 检查，扁平化层级；(3) 图片加载未优化→ 使用 Glide 等库并控制尺寸；(4) 频繁创建对象导致 GC→ 使用 RecyclerView 的缓存机制，避免在 bind 中 new 对象；(5) 数据量过大未分页→ 使用 Paging3；(6) 没有固定高度导致频繁测量→ 设置 hasFixedSize(true) 或固定 item 高度。",
+    "key_points": [
+      "onBindViewHolder 耗时",
+      "过度绘制",
+      "图片加载优化",
+      "GC 抖动",
+      "Paging3",
+      "hasFixedSize"
+    ],
+    "difficulty": "advanced"
+  }
+]

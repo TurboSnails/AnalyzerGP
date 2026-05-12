@@ -9,8 +9,13 @@ expected_chunk 所对应的证据片段。
   2. expected_chunk 标签出现在任意召回 chunk 中（回落标签匹配）
   多跳题（expected_chunk 含 " / "）只需命中其中任意一个分支即可。
 
+兼容模式：
+  - run_eval()          : 旧版接口，使用 query_db()，输出 Recall@K
+  - run_structured_eval(): 新版接口，使用 query_db_structured()，输出 Recall + MRR + Hit + Latency
+
 运行方式：
     uv run python -m ai_app1.eval.evaluate
+    uv run python -m ai_app1.eval.evaluate --structured
 """
 
 import json
@@ -86,6 +91,10 @@ def _is_hit(result_text: str, expected_chunk: str, evidence: str) -> tuple[bool,
     return False, f"MISS — expected={expected_chunk!r}"
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# 旧版接口（向后兼容）
+# ═══════════════════════════════════════════════════════════════════════════════
+
 def run_eval(top_k_label: str = "5") -> None:
     dataset = _load_dataset()
     total = len(dataset)
@@ -134,5 +143,141 @@ def run_eval(top_k_label: str = "5") -> None:
     print(f"{'─'*60}\n")
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# 新版结构化接口（集成 MRR / Hit@K / Latency）
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def run_structured_eval(
+    top_k_label: str = "5",
+    config=None,
+    enable_rewrite: bool = True,
+) -> dict:
+    """
+    结构化召回评测，使用 query_db_structured() 获取完整排序与耗时信息。
+
+    与 run_eval 的区别：
+      - 输出 Recall@K + MRR + Hit@1/3/5 + Latency 统计
+      - 支持消融配置（config / enable_rewrite）
+      - 返回结构化 dict，可用于实验报告
+
+    Returns:
+        {
+            "recall@k": float,
+            "mrr": float,
+            "hit@1": float,
+            "hit@3": float,
+            "hit@5": float,
+            "latency_ms": {"mean": ..., "p95": ...},
+            "details": [...],
+        }
+    """
+    from ai_app1.service.vector_store import query_db_structured, RetrievalConfig
+    from ai_app1.service.query_rewriter import rewrite_queries
+    from ai_app1.eval.metrics import aggregate_metrics
+
+    dataset = _load_dataset()
+    total = len(dataset)
+    cfg = config or RetrievalConfig()
+
+    print(f"\n{'─'*60}")
+    print(f"  Structured Retrieval Evaluation   评测集: {total} 条")
+    print(f"  Config: {cfg.summary()}")
+    print(f"{'─'*60}\n")
+
+    rank_lists = []
+    ground_truths = []
+    latencies = []
+    details = []
+
+    for i, item in enumerate(dataset, 1):
+        query = item["query"]
+        expected = item.get("expected_chunk", "")
+        raw_ev = item.get("evidence", "")
+        evidence = " ".join(raw_ev) if isinstance(raw_ev, list) else str(raw_ev)
+
+        # Query 扩写（可控）
+        t_rewrite = 0.0
+        if enable_rewrite and cfg.enable_rewrite:
+            t0 = time.perf_counter()
+            queries = rewrite_queries(query, history=[])
+            t_rewrite = (time.perf_counter() - t0) * 1000
+        else:
+            from ai_app1.service.query_rewriter import RewriteQuery
+            queries = [RewriteQuery(text=query, type="original", weight=1.0,
+                                    routes=["dense", "hyde", "bm25"])]
+
+        result = query_db_structured(queries, config=cfg)
+        rank_list = [c.id for c in result.chunks]
+
+        # 命中判断（基于 chunk 文本）
+        gt_ids = set()
+        for c in result.chunks:
+            if _is_hit(c.text, expected, evidence)[0]:
+                gt_ids.add(c.id)
+
+        hit = len(gt_ids) > 0
+        first_rank = 999
+        for idx, doc_id in enumerate(rank_list, start=1):
+            if doc_id in gt_ids:
+                first_rank = idx
+                break
+
+        total_latency = result.latency_ms + t_rewrite
+        rank_lists.append(rank_list)
+        ground_truths.append(gt_ids)
+        latencies.append(total_latency)
+        details.append({
+            "query": query,
+            "hit": hit,
+            "rank": first_rank,
+            "matched_ids": list(gt_ids),
+            "latency_ms": round(total_latency, 2),
+        })
+
+        status = "✅ HIT" if hit else "❌ MISS"
+        print(f"[{i:02d}/{total}] {status}  rank={first_rank if hit else 'MISS'}  ({total_latency:.0f}ms)")
+        print(f"  Query   : {query[:60]}")
+        if not hit and result.ordered_text:
+            preview = result.ordered_text[:120].replace("\n", " ")
+            print(f"  Preview : {preview!r}")
+        print()
+
+    metrics = aggregate_metrics(
+        rank_lists=rank_lists,
+        ground_truths=ground_truths,
+        latencies_ms=latencies,
+        config_summary=cfg.summary(),
+    )
+
+    print(f"{'─'*60}")
+    print(f"  Recall@5  = {metrics.recall_at_5:.0%}")
+    print(f"  MRR       = {metrics.mrr:.3f}")
+    print(f"  Hit@1     = {metrics.hit_at_1:.0%}")
+    print(f"  Hit@3     = {metrics.hit_at_3:.0%}")
+    print(f"  Hit@5     = {metrics.hit_at_5:.0%}")
+    print(f"  平均延迟   = {metrics.latency.mean:.0f}ms  (P95={metrics.latency.p95:.0f}ms)")
+    print(f"{'─'*60}\n")
+
+    return {
+        "recall@5": metrics.recall_at_5,
+        "mrr": metrics.mrr,
+        "hit@1": metrics.hit_at_1,
+        "hit@3": metrics.hit_at_3,
+        "hit@5": metrics.hit_at_5,
+        "latency_ms": metrics.to_dict()["latency_ms"],
+        "details": details,
+    }
+
+
+# ─── 主入口 ───────────────────────────────────────────────────────────────────
+
 if __name__ == "__main__":
-    run_eval()
+    import argparse
+    parser = argparse.ArgumentParser(description="Retrieval Evaluation")
+    parser.add_argument("--structured", action="store_true", help="使用结构化评测（含 MRR / Hit@K / Latency）")
+    args = parser.parse_args()
+
+    if args.structured:
+        run_structured_eval()
+    else:
+        run_eval()

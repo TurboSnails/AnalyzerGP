@@ -1,38 +1,58 @@
 """
-AiClient：封装与 MiniMax-M2.7 模型的交互逻辑。
+AiClient：封装与主答案 LLM 的交互逻辑，支持多后端切换。
 
 提供两个核心接口：
 - chat(messages, use_tools=False)：普通对话，返回文本
 - run_agent(messages)：工具增强对话，内部自动处理工具调用循环
 
-内部使用 openai.AsyncOpenAI SDK，通过 base_url 指向 MiniMax 兼容端点。
-每次请求不会重新创建客户端（AiClient 单例由 chat.py 管理）。
+后端通过 LLM_BACKEND 环境变量切换：
+  minimax  → MiniMax-M2.7 远程（生产）
+  ollama   → 本地 Ollama OpenAI 兼容端点（开发）
+  openai   → GPT/DeepSeek/通义等任意 OpenAI 兼容厂商
+所有后端走同一份 openai SDK 调用，零代码差异。
 """
 import json
 import logging
+import os
 import time
 import openai
+from ai_app1.core.config import LLM_BACKEND, LLM_BASE_URL, LLM_MODEL, LLM_API_KEY
 from ai_app1.service.tools import aiTools, TOOL_FUNCTIONS
 
 ai_client_logger = logging.getLogger("ai_client")
 
+# 限制单次回答的最大 token 数。RAG 场景 200-400 字够用，避免 LLM 长篇大论拖慢响应。
+# 设 0 = 不限制（原行为）。MiniMax 默认无限制时容易输出 800+ 字，浪费 4-6s 生成时间。
+LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "512"))
+
 
 class AiClient:
     """
-    MiniMax-M2.7 模型客户端。
+    多后端 LLM 客户端（OpenAI 兼容协议）。
 
     Attributes:
         ai_api_key: API 密钥（初始化时脱敏，仅显示前 8 位）
         client: openai.AsyncOpenAI 实例，复用 HTTP 连接池
+        _model: 当前使用的模型名（按后端解析）
+        _backend: 当前后端标识（用于日志）
     """
 
-    def __init__(self, ai_api_key: str):
-        self.ai_api_key = ai_api_key[:8] + "****"  # 脱敏日志输出
+    def __init__(self, ai_api_key: str | None = None,
+                 base_url: str | None = None,
+                 model: str | None = None):
+        api_key = ai_api_key or LLM_API_KEY or "placeholder"
+        self.ai_api_key = (api_key[:8] + "****") if api_key else "none"
+        self._backend = LLM_BACKEND
+        self._model = model or LLM_MODEL
+        self._base_url = base_url or LLM_BASE_URL
         self.client = openai.AsyncOpenAI(
-            base_url="https://api.minimaxi.com/v1",
-            api_key=ai_api_key
+            base_url=self._base_url,
+            api_key=api_key,
         )
-        ai_client_logger.info(f"AiClient 初始化: base_url=https://api.minimaxi.com/v1")
+        ai_client_logger.info(
+            f"AiClient 初始化: backend={self._backend}, "
+            f"base_url={self._base_url}, model={self._model}"
+        )
 
     # ─── 流式对话 ───────────────────────────────────────────────
 
@@ -42,21 +62,39 @@ class AiClient:
         use_tools 只控制是否将工具定义发给模型，tool_calls 由 stream_run_agent 负责处理。
         """
         kwargs = {
-            "model": "MiniMax-M2.7",
+            "model": self._model,
             "messages": messages,
             "stream": True,
         }
+        if LLM_MAX_TOKENS > 0:
+            kwargs["max_tokens"] = LLM_MAX_TOKENS
         if use_tools:
             kwargs["tools"] = aiTools
 
+        t0 = time.perf_counter()
         response = await self.client.chat.completions.create(**kwargs)
 
+        first_token_ms = None
+        char_count = 0
         async for chunk in response:
             if not chunk.choices:
                 continue
             delta = chunk.choices[0].delta
             if delta.content:
+                if first_token_ms is None:
+                    first_token_ms = (time.perf_counter() - t0) * 1000
+                char_count += len(delta.content)
                 yield delta.content
+
+        total_ms = (time.perf_counter() - t0) * 1000
+        gen_ms = total_ms - (first_token_ms or 0)
+        chars_per_sec = (char_count / gen_ms * 1000) if gen_ms > 0 else 0
+        ai_client_logger.info(
+            f"[{self._backend}] LLM 完成: TTFT={first_token_ms:.0f}ms, "
+            f"生成={gen_ms:.0f}ms, 总={total_ms:.0f}ms, "
+            f"输出={char_count}字符 ({chars_per_sec:.0f}字符/秒), "
+            f"max_tokens={LLM_MAX_TOKENS}"
+        )
 
     async def stream_chat(self, messages: list, use_tools: bool = False):
         """
@@ -78,12 +116,24 @@ class AiClient:
             full = ""
             tool_calls: list[dict] = []
 
-            response = await self.client.chat.completions.create(
-                model="MiniMax-M2.7",
-                messages=messages,
-                tools=aiTools,
-                stream=True,
-            )
+            stream_kwargs = {
+                "model": self._model,
+                "messages": messages,
+                "tools": aiTools,
+                "stream": True,
+            }
+            if LLM_MAX_TOKENS > 0:
+                # 双保险：max_tokens（OpenAI 旧式）+ max_completion_tokens（新式）
+                # MiniMax 部分模型只认其中一个，全发避免猜参数名
+                stream_kwargs["max_tokens"] = LLM_MAX_TOKENS
+                stream_kwargs["extra_body"] = {
+                    "max_completion_tokens": LLM_MAX_TOKENS,
+                    "tokens_to_generate": LLM_MAX_TOKENS,  # MiniMax 文档曾用此名
+                }
+
+            t0 = time.perf_counter()
+            response = await self.client.chat.completions.create(**stream_kwargs)
+            first_token_ms: float | None = None
 
             async for chunk in response:
                 if not chunk.choices:
@@ -91,6 +141,8 @@ class AiClient:
                 delta = chunk.choices[0].delta
 
                 if delta.content:
+                    if first_token_ms is None:
+                        first_token_ms = (time.perf_counter() - t0) * 1000
                     full += delta.content
                     yield delta.content
 
@@ -106,6 +158,21 @@ class AiClient:
                             tool_calls[idx]["function"]["name"] = tc.function.name
                         if tc.function and tc.function.arguments:
                             tool_calls[idx]["function"]["arguments"] += tc.function.arguments
+
+            total_ms = (time.perf_counter() - t0) * 1000
+            gen_ms = total_ms - (first_token_ms or 0)
+            chars_per_sec = (len(full) / gen_ms * 1000) if gen_ms > 0 else 0
+            prompt_chars = sum(len(str(m.get("content", ""))) for m in messages)
+            ai_client_logger.info(
+                f"[{self._backend}] LLM step={step+1}: "
+                f"prompt={prompt_chars}字符, "
+                f"TTFT={first_token_ms or 0:.0f}ms, "
+                f"生成={gen_ms:.0f}ms, "
+                f"总={total_ms:.0f}ms, "
+                f"输出={len(full)}字符 ({chars_per_sec:.0f}字符/秒), "
+                f"tool_calls={len(tool_calls)}, "
+                f"max_tokens={LLM_MAX_TOKENS}"
+            )
 
             if not full and not tool_calls:
                 break
@@ -161,9 +228,11 @@ class AiClient:
 
         try:
             kwargs = {
-                "model": "MiniMax-M2.7",
-                "messages": messages
+                "model": self._model,
+                "messages": messages,
             }
+            if LLM_MAX_TOKENS > 0:
+                kwargs["max_tokens"] = LLM_MAX_TOKENS
             if use_tools:
                 kwargs["tools"] = aiTools
                 ai_client_logger.debug(f"[{step_id}] 启用 tools，tools 数量: {len(aiTools)}")
@@ -216,10 +285,10 @@ class AiClient:
             messages.extend(tool_results)
             ai_client_logger.debug(f"[{step_id}] 工具结果追加: {len(tool_results)} 条")
 
-            response = await self.client.chat.completions.create(
-                model="MiniMax-M2.7",
-                messages=messages
-            )
+            final_kwargs = {"model": self._model, "messages": messages}
+            if LLM_MAX_TOKENS > 0:
+                final_kwargs["max_tokens"] = LLM_MAX_TOKENS
+            response = await self.client.chat.completions.create(**final_kwargs)
             final_content = response.choices[0].message.content or ""
             ai_client_logger.info(
                 f"[{step_id}] chat 最终响应: content_len={len(final_content)}, "
@@ -287,11 +356,14 @@ class AiClient:
             ai_client_logger.debug(f"[{run_id}] Step {step + 1}/{MAX_STEPS}: 发送请求")
             start = time.monotonic()
 
-            response = await self.client.chat.completions.create(
-                model="MiniMax-M2.7",
-                messages=messages,
-                tools=aiTools,
-            )
+            agent_kwargs = {
+                "model": self._model,
+                "messages": messages,
+                "tools": aiTools,
+            }
+            if LLM_MAX_TOKENS > 0:
+                agent_kwargs["max_tokens"] = LLM_MAX_TOKENS
+            response = await self.client.chat.completions.create(**agent_kwargs)
 
             msg = response.choices[0].message
             tool_calls = getattr(msg, "tool_calls", None)

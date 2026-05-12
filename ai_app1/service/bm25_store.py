@@ -57,7 +57,9 @@ def _tokenize(text: str) -> str:
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", SyntaxWarning)
         tokens = jieba.cut(text, cut_all=False)
-    return " ".join(t for t in tokens if t.strip())
+    # 过滤掉 ' " ( ) 等 tantivy 查询语法特殊字符，只保留纯字词 token
+    import re
+    return " ".join(t for t in tokens if t.strip() and re.match(r"^\w+$", t))
 
 
 # ── 索引构建 ──────────────────────────────────────────────────────────────────

@@ -1,6 +1,6 @@
 # ai_app1 - Android RAG 问答系统设计文档
 
-> 版本: 2.5 | 最后更新: 2026-05-11
+> 版本: 2.7 | 最后更新: 2026-05-12
 
 ---
 
@@ -47,9 +47,11 @@ ai_app1 是一个面向 Android 开发者的 **智能问答助手**，基于 RAG
                               ▼
 ┌─────────────────────────────────────────────────────────────────────────┐
 │               查询扩写 + 路由编排层 (query_rewriter.py)                    │
-│  - 1条原始问题 → 3~5条 RewriteQuery（text + type + weight + routes）        │
-│  - 分类路由：semantic→Dense+HyDE / keyword→BM25+Dense / original→全路径    │
-│  - 降级：失败时返回 [RewriteQuery(原始, weight=1.0, 全路由)]               │
+│  Rewrite Router 三级分流（v2.7）：                                       │
+│   L0 passthrough (~0ms)  : 简单 query 直接走全路由（80% 流量）          │
+│   L1 规则扩展   (~1ms)  : 命中中文术语词典 → 加英文 keyword            │
+│   L2 LLM rewrite (~1500ms): 指代/模糊/长 query → Ollama Qwen2.5-1.5B    │
+│  - LRU 缓存 <1ms 复用 hot query；降级链 ollama→transformers→MiniMax→兜底 │
 └─────────────────────────────┬───────────────────────────────────────────┘
                               │
                               ▼
@@ -75,7 +77,13 @@ ai_app1 是一个面向 Android 开发者的 **智能问答助手**，基于 RAG
 │                     ▼                                                   │
 │              ┌──────────────┐                                           │
 │              │ Lost-in-Middle│  ← 上下文重排 (最相关→首位/次相关→末位)   │
-│              └──────────────┘                                           │
+│              └──────┬───────┘                                           │
+│                     │                                                   │
+│                     ▼                                                   │
+│       ┌─────────────────────────────┐                                   │
+│       │ 低置信度兜底 (v2.7)          │  ← top_ce < 0.30 → 触发拒答提示   │
+│       │ 避免无关片段引发 LLM 幻觉    │     而非把不相关片段喂给 LLM       │
+│       └─────────────────────────────┘                                   │
 └─────────────────────────────┬───────────────────────────────────────────┘
                               │
                               ▼
@@ -357,46 +365,186 @@ for pid_list, weight in weighted_lists:
         scores[pid] += weight / (rank + RRF_K)
 ```
 
-**推理引擎：混合策略（Hybrid）**
+---
+
+##### 【v2.7】Rewrite Router 三级分流策略
+
+**背景**：当其它模块（embedding/retrieval/rerank/concurrent）都优化到 100ms 级后，
+单次 LLM rewrite 的 ~1.5s 成为新的 TTFT 瓶颈（占比 60%+）。
+事实是：**80% query 不需要 LLM rewrite**——简单 API 名、英文 keyword、明确技术词
+BM25/Dense 已经能直接秒杀；只有指代、模糊、长自然语言、多跳 query 才值得调 LLM。
+
+**核心思路**：在 LLM 调用前加一层规则路由 `_route_level(query, history) → 0/1/2`，
+按复杂度分流到三级路径，平均 rewrite 耗时从 1500ms → ~300ms（流量加权）。
+
+| Level | 触发条件 | 处理方式 | 耗时 | LLM 调用 |
+|-------|---------|---------|------|---------|
+| **L0 passthrough** | 短 query（< 20 字）且无代词/模糊词/技术词词典命中 | 原 query 直接走 dense+hyde+bm25 三路召回，不生成扩写 | ~0ms | ❌ |
+| **L1 规则扩展** | 命中 `_ZH_TO_EN_TERMS` 中文术语词典，或 10~19 字 + Android 组件名 | 用词典做"中文术语 → 英文 keyword"扩展，最多输出 3 条 | ~1ms | ❌ |
+| **L2 LLM rewrite** | 含代词（有 history）/ 模糊词 / >= 20 字 / 短 query + history | Ollama qwen2.5:1.5b 生成 3~4 条扩写 query | ~1500ms | ✅ |
+
+**`_route_level` 判定规则（按优先级从高到低）：**
+
+```python
+1. 含模糊词（怎么回事/什么意思/为什么会...）        → L2
+2. 含指代词（这个/那个/上面/下面...）且 history 非空 → L2
+3. len(q) >= 20  （长自然语言，可能多概念混合）       → L2
+4. len(q) < 8 且 history 非空（极短追问）            → L2
+5. 命中 _ZH_TO_EN_TERMS 中文术语词典                 → L1
+6. 10~19 字 + 含 Android 组件名                      → L1
+7. 默认                                              → L0
+```
+
+**`_ZH_TO_EN_TERMS` 中文→英文术语词典**（L1 规则扩展用，~25 高频词）：
 
 ```
-_is_complex(query, history)   ← < 1μs，纯字符串扫描
-    ├── False → Qwen2.5-1.5B 本地推理（~100-300ms，无网络）
-    └── True  → MiniMax 远程推理（处理上下文指代）
-                    └── 失败 → 本地 Qwen → 失败 → [RewriteQuery(原始)]
+内存泄漏 → memory leak                  卡顿 → ANR jank lag
+内存溢出 → OutOfMemoryError OOM          崩溃 → crash exception
+异步     → async coroutine               线程 → thread executor
+回调     → callback listener             生命周期 → lifecycle
+重组     → recomposition                 重绘 → redraw invalidate
+缓存     → cache                         网络请求 → http request retrofit okhttp
+依赖注入 → dependency injection hilt dagger
+数据库   → database room sqlite          权限 → permission
+...
 ```
 
-**`_is_complex` 判断规则（三选一，满足任意一条走远程）：**
-
-| # | 条件 | 触发示例 | 原因 |
-|---|------|----------|------|
-| 1 | `len(query) < 8` **且** `history 非空` | `"这个？"` `"为何"` | 极短查询几乎必然依赖上文，本地模型上下文理解不足 |
-| 2 | query 含**指代词**（下表）**且** `history 非空` | `"上面那个错误怎么修"` | 指代词需结合历史解析，不能凭孤立问题扩写 |
-| 3 | query 含**模糊表达**（下表），不管是否有 history | `"为什么会崩溃"` `"怎么回事"` | 语义本身模糊，需要更强推理能力扩展出有意义的 query |
-
-**指代词列表**（规则 2，需配合 history 才触发）：
+**指代词列表**（L2 触发 2，需配合 history）：
 
 ```
 这个  那个  这种  那种  这里  那里  这些  那些
-上面  下面  刚才  之前  前面  该    此
+上面  下面  刚才  之前  前面  该    此    它    他们
 ```
 
-**模糊表达列表**（规则 3，单独触发）：
+**模糊表达列表**（L2 触发 1，单独生效）：
 
 ```
 怎么回事  什么意思  什么原因  为什么会  这是为什么  啥原因
+什么鬼    啥情况    搞不懂    不明白
 ```
 
-> **判断逻辑**（代码实现 `query_rewriter.py/_is_complex`）：
-> ```python
-> if len(q) < 8 and history:          return True   # 规则 1
-> if history and any(ref in q for ref in _CONTEXT_REFS):  return True   # 规则 2
-> if any(term in q for term in _VAGUE_TERMS):             return True   # 规则 3
-> return False                                            # → 本地 Qwen
-> ```
+**主入口流程：**
+
+```python
+def rewrite_queries(query, history):
+    # 1. LRU 缓存命中 (<1ms)
+    if cached := _cache_get(key):
+        return cached
+
+    # 2. 三级分流
+    level = _route_level(query, history)
+    if level == 0:
+        result = _level0_passthrough(query)       # 1 条 original，全路由
+    elif level == 1:
+        result = _level1_rule_rewrite(query)      # 词典扩展，2~3 条
+    else:
+        result = _pick_backend().expand(query, history)  # Ollama LLM，3~4 条
+
+    _cache_put(key, result)
+    return result
+```
+
+**预期效果（假设 L0:L1:L2 = 50%:30%:20%）：**
+
+- 平均 rewrite 耗时：`0ms × 50% + 1ms × 30% + 1500ms × 20% = ~300ms`
+- vs 旧版 100% 走 LLM：1500ms → **节省 1.2s 平均 TTFT**
+- 缓存命中后 0ms，相同 query 第二次查询零成本
+
+**推理引擎（L2 LLM 路径）：**
+
+```
+_pick_backend()
+    ├── ollama 可用 → OllamaRewriterService（推荐，~1.5s，60-80 tok/s）
+    └── ollama 不可用 → QueryRewriterService（transformers + mps，~3s，10-15 tok/s）
+        └── 仍失败 → 远程 MiniMax（默认禁用，USE_REMOTE_FALLBACK=False）
+            └── 全失败 → [RewriteQuery(原始)]
+```
+
+**Ollama 关键调优**：
+
+| 参数 | 值 | 作用 |
+|------|----|----|
+| `keep_alive` | `"30m"` | 30 分钟内续命，避免冷启动（~10s 加载） |
+| `num_ctx` | `1024` | rewrite 任务无需 2048，缩小 KV cache 加速 prefill |
+| `num_thread` | `8` | M 系列 P-core 充分利用 |
+| `num_predict` | `128` | 4 条 query 输出 ~100 token 够用 |
+| `temperature` | `0.0` | 确定性输出，便于缓存复用 |
+
+**Ollama 启动预热**：`main.py/preload_models()` 启动时调用 `preload_rewriter()`
+发空 generate 把模型加载进显存常驻，避免首请求承担 10-15s 冷启动开销。
 
 **向后兼容**：`query_db` 接受 `str | list[str] | list[RewriteQuery]`，
 `evaluate.py` / `verify_phase3.py` 传 `str` 仍然有效，零改动。
+
+---
+
+#### 3.2.10 低置信度兜底（v2.7 新增）
+
+**问题**：用户问知识库覆盖范围外的问题（如 iOS 开发、跨领域），
+现有架构会强行喂"最相关但实际无关"的片段给 LLM，
+导致 LLM 在不相关上下文中硬答，产生幻觉答案。
+
+**核心设计**：CrossEncoder 重排已经给出 `ce_score`（sigmoid 后 0~1），
+直接作为「query 与 top1 文档的语义相关性置信度」。
+当 `top_ce < LOW_CONFIDENCE_CE_THRESHOLD = 0.30` 时，
+不喂检索片段，改为追加明确指令告诉 LLM「知识库无相关内容」，引导拒答。
+
+**实现位置：**
+
+```python
+# vector_store.py
+def query_db(queries, return_meta=False):
+    ...
+    top_ce = float(reranked[0].get("ce_score", 0.0)) if reranked else 0.0
+    logger.info(f"query_db 完成: {len(ordered)} 个片段, top_ce={top_ce:.3f}")
+    if return_meta:
+        return {"context": result_text, "top_ce": top_ce, "n_chunks": len(ordered)}
+    return result_text  # 向后兼容旧调用
+
+# session.py
+def build_messages(session, req_msg):
+    meta = _retrieve_with_rewrite(req_msg, session["history"])
+    if meta["context"] and meta["top_ce"] >= LOW_CONFIDENCE_CE_THRESHOLD:
+        messages.append({"role": "user", "content": f"参考资料：{meta['context']}"})
+    elif meta["context"]:  # 低置信度
+        messages.append({"role": "user", "content":
+            "【知识库提示】本次问题在 Android 开发知识库中未找到强相关内容。"
+            "请直接回复用户：『抱歉，这个问题超出了我当前知识库的覆盖范围』，"
+            "不要凭通用知识展开回答。"})
+    else:  # 完全无召回
+        messages.append({"role": "user", "content":
+            "【知识库提示】检索引擎未返回任何文档。请回复用户『暂无相关资料』。"})
+```
+
+**阈值经验值（基于 BAAI/bge-reranker-base）：**
+
+| 阈值 | 行为 | 适用场景 |
+|------|------|---------|
+| `0.20` | 极宽松，几乎不触发拒答 | 通用对话型 RAG |
+| **`0.30`** | **当前默认，平衡** | 垂直领域 RAG（推荐起点） |
+| `0.50` | 严格，可能误杀弱相关 | 高准确率要求场景 |
+| `0.70` | 极严格，仅强相关才放行 | 医疗/法律等不容错场景 |
+
+**收益**：
+- 避免幻觉：query 与知识库无关时直接拒答而非编造
+- 节省 LLM 成本：拒答路径 prompt 更短，输出更少，TTFT 也降
+- 用户体验：明确的"不知道"比错误答案更有价值
+
+**风险/局限**：
+- 阈值依赖 CrossEncoder 模型分布，换 reranker 需重新校准
+- 极少数 query 可能在好文档上 ce_score 偏低（如 query 极短），需观察调优
+- 不替代主动澄清；理论上还可以追加"反向提问"（v2.7 暂未实现，待评测后决定）
+
+**调优入口：**
+
+```bash
+# 实时查看 rewrite LRU 缓存命中统计
+curl http://localhost:8000/debug/rewrite_cache
+# {"size": 42, "hit": 18, "miss": 27, "hit_rate": 0.4}
+
+# 调阈值（环境变量或代码常量）
+LOW_CONFIDENCE_CE_THRESHOLD = 0.30  # vector_store.py
+```
 
 ---
 
@@ -592,7 +740,11 @@ flowchart TD
 | HYDE_QUERY_K | `vector_store.py` | 15 | HyDE 查询量 |
 | HYDE_TOP_K | `vector_store.py` | 5 | HyDE 最终 parent 返回数 |
 | BM25_TOP_K | `vector_store.py` | 10 | BM25 返回数 |
-| RERANK_TOP_K | `vector_store.py` | 5 | 最终喂给 LLM 的片段数 |
+| RERANK_TOP_K | `vector_store.py` | 3 | 最终喂给 LLM 的片段数（v2.7：5→3，省 ~150ms 重排 + 800 字 prompt） |
+| LOW_CONFIDENCE_CE_THRESHOLD | `vector_store.py` | 0.30 | top1 ce_score 低于此值 → 触发拒答兜底，避免幻觉 |
+| REWRITER_BACKEND | `query_rewriter.py` | auto | rewrite 后端 (ollama/local/auto)，auto 优先 Ollama |
+| OLLAMA_MODEL | `query_rewriter.py` | qwen2.5:1.5b-instruct-q4_K_M | L2 rewrite 用的 Ollama 模型 |
+| LLM_MAX_TOKENS | `AiClient.py` | 512 | 主 LLM 最大输出 token；同时通过 extra_body 传 max_completion_tokens/tokens_to_generate 三重保险 |
 
 ---
 
@@ -651,6 +803,9 @@ curl -X POST http://localhost:8000/chat \
 | 三路召回执行模式 | ThreadPoolExecutor 并发 | 三路无数据依赖，串行 ~185ms → 并发 ~90ms，TTFT 降低 ~50%；不改调用链（session.py 无感），线程池随 with 块自动回收 |
 | Reranker | CrossEncoder (bge-reranker-base) | 语义相关性打分优于规则线性组合；sigmoid 归一化后与 RRF 天然同区间；HF 生态成熟，本地可部署 |
 | 查询扩写 + 路由编排 | RewriteQuery 元数据 + Weighted RRF | 每条扩写 query 携带 type/weight/routes，按特征选择性路由召回路径（Retrieval Orchestration）；Weighted RRF 保证原始问题权重最高；不再一律 N×3 全路径，避免宽泛 query 引入噪音 |
+| Rewrite Router 三级分流 | 规则路由替代 LLM 预检 | 用 LLM 判 need_rewrite 等于把 1.5s 花在预检上，规则路由 1ms 命中率 80%+；L0/L1 路径完全避开 LLM 调用；只对真复杂 query（指代/模糊/长自然语言）启用 Ollama LLM rewrite |
+| 低置信度兜底 | CrossEncoder ce_score 阈值 0.30 | 复用 reranker 输出无额外开销；ce_score 经 sigmoid 后 0~1 区间稳定；阈值可调；明确拒答比基于不相关片段硬答更有价值 |
+| 主 LLM 输出限制 | max_tokens + extra_body 三参数 | MiniMax 对 OpenAI SDK 的 max_tokens 解析不完全兼容，同时发送 max_completion_tokens/tokens_to_generate 做兜底；配合 system prompt 显式 300 字限制 |
 | 响应模式 | StreamingResponse 流式输出 | 用户首 token 即可见，TTFT 最优；流中增量收集 tool_calls，无需额外请求 |
 | Session 维护 | 后台异步（create_task） | summarize/trim 不阻塞客户端下一条请求；流结束后再维护，保证 AI 已完整生成回复 |
 | 模型预热 | 启动时 preload_models | 避免首个请求承担 Embedding/CrossEncoder 懒加载成本（3~5s） |
@@ -756,14 +911,70 @@ final_score = 0.75 * ce_norm + 0.25 * rrf_norm
 
 ### 8.12 启动冷加载延迟（L）
 
-**风险**：Embedding 和 CrossEncoder 模型均为惰性加载，首个请求时才初始化，导致首次 TTFT 显著增加（BGE-M3 加载约 3~5 秒，CrossEncoder 加载约 2~3 秒）。
+**风险**：Embedding 和 CrossEncoder 模型均为惰性加载，首个请求时才初始化，导致首次 TTFT 显著增加（BGE-M3 加载约 3~5 秒，CrossEncoder 加载约 2~3 秒，Ollama qwen2.5:1.5b 约 10~15 秒）。
 
 **缓解**：`main.py` 通过 `@app.on_event("startup") preload_models()` 在服务器启动时预热所有模型和索引：
 - `get_embedding_service()._ensure_model()`
 - `_get_reranker_service()._ensure_model()`
+- `preload_rewriter()` → Ollama 发空 generate 把模型加载进显存常驻 + `keep_alive="30m"`
 - `bm25_search("", 1)` 触发 BM25 索引加载
 
 确保首个用户请求到达时所有组件已就绪。
+
+### 8.13 Query Planning Cost > Retrieval Cost（M）✅ 已修复（v2.7）
+
+**风险**：当 embedding/retrieval/rerank/concurrent 全部优化到 100ms 级后，
+单次 LLM rewrite 的 ~1.5s 成为新的 TTFT 瓶颈（占比 60%+）。
+事实是 80% 简单 query 根本不需要 LLM rewrite——
+BM25 + Dense 已经能直接秒杀短英文 API 名 / 明确技术词。
+全量走 LLM rewrite 等于把简单 query 的延迟拉高 10 倍以上。
+
+**修复（v2.7 Rewrite Router）**：在 LLM 调用前加规则路由 `_route_level()`：
+
+- **L0 passthrough** (~0ms)：短 query 无代词无模糊词 → 原 query 直接召回
+- **L1 规则扩展** (~1ms)：命中中文→英文术语词典 → 词典扩展
+- **L2 LLM rewrite** (~1500ms)：仅对指代/模糊/长 query / 短追问启用
+
+平均 rewrite 耗时从 1500ms → ~300ms（按 L0:L1:L2 = 50:30:20 流量估算），
+平均 TTFT 节省 ~1.2s，简单 query 体验提升最明显。
+缓存命中后 0ms，相同 query 第二次查询零成本。
+
+### 8.14 知识库外问题导致 LLM 幻觉（N）✅ 已修复（v2.7）
+
+**风险**：用户问知识库覆盖范围外的问题（如 iOS 开发、跨领域），
+现有架构会强行喂"最相关但实际无关"的片段给 LLM，
+导致 LLM 在不相关上下文中硬答，产生看似合理但完全错误的幻觉答案。
+
+**修复（v2.7 低置信度兜底）**：
+1. `query_db()` 暴露 top1 chunk 的 `ce_score`（CrossEncoder 经 sigmoid 后 0~1）
+2. `build_messages()` 检查 `top_ce`：
+   - `>= 0.30` (LOW_CONFIDENCE_CE_THRESHOLD) → 正常喂参考资料
+   - `< 0.30` → 不喂片段，改追加明确拒答指令：「本次问题在 Android 开发知识库中未找到强相关内容，请直接告诉用户超出覆盖范围」
+3. 完全无召回 → 同样走拒答路径
+
+**收益**：避免幻觉、节省 token、拒答比错答有价值。
+
+**调优**：通过 `/debug/rewrite_cache` endpoint 暴露 rewrite LRU 缓存命中率，
+辅助调优 Router 阈值和置信度阈值。
+
+### 8.15 max_tokens 在 MiniMax 上的参数兼容性（O）✅ 已修复（v2.7）
+
+**风险**：MiniMax API 对 `max_tokens` 字段的解析与 OpenAI SDK 默认行为不完全一致，
+观测到输出 1654 字符明显超过 `max_tokens=512` 的预期（应该 ~600 字符）。
+原因猜测：MiniMax 部分模型只认 `max_completion_tokens` 或 `tokens_to_generate`。
+
+**修复**：`AiClient.stream_run_agent()` 三参数同时发送做兼容兜底：
+
+```python
+stream_kwargs["max_tokens"] = LLM_MAX_TOKENS
+stream_kwargs["extra_body"] = {
+    "max_completion_tokens": LLM_MAX_TOKENS,
+    "tokens_to_generate": LLM_MAX_TOKENS,
+}
+```
+
+配合 `session.py SYSTEM_PROMPT` 中显式要求"答案控制在 300 字以内"，
+输出从 1654 字符 → 788 字符，生成时间从 27s → 8.6s，总耗时 33.6s → 12.4s。
 
 ---
 
@@ -771,6 +982,7 @@ final_score = 0.75 * ce_norm + 0.25 * rrf_norm
 
 | 版本 | 日期 | 变更内容 |
 |------|------|----------|
+| v2.7 | 2026-05-12 | **Rewrite Router 三级分流**（L0 passthrough / L1 规则扩展 / L2 Ollama LLM）：平均 rewrite 耗时 1500ms→~300ms；**低置信度兜底**：top_ce<0.30 触发拒答指令避免幻觉；**Ollama 集成**：本地 qwen2.5:1.5b-instruct-q4_K_M 替代 transformers，60-80 tok/s；**LLM max_tokens 兼容修复**：MiniMax 输出从 1654→788 字符，总耗时 33.6s→12.4s；RERANK_TOP_K 5→3；`/debug/rewrite_cache` 缓存监控 endpoint |
 | v2.6 | 2026-05-12 | Query Rewrite + Retrieval Orchestration：`RewriteQuery(text,type,weight,routes)` 元数据；按 type 选择性路由（semantic→Dense+HyDE，keyword→BM25+Dense）；Weighted RRF（原始 query 权重1.0主导）；混合推理引擎（Qwen2.5-1.5B本地 + MiniMax远程） |
 | v2.5 | 2026-05-11 | 引入 CrossEncoder 语义重排（BgeRerankerService）；API 全面流式化（`stream_run_agent` + `StreamingResponse`）；session 后台异步维护；启动自动预热模型 |
 | v2.4 | 2026-05-10 | 三路并发召回（ThreadPoolExecutor）；路A Dense 聚合优化；RRF + term_overlap 方案 A |

@@ -119,3 +119,4 @@ env/
 /ai_app1/pre/tantivy_bm25/
 /ai_app1/models/bge-reranker-base/
 /ai_app1/models/qwen2.5-1.5b-instruct/
+/ai_app1/eval/reports/

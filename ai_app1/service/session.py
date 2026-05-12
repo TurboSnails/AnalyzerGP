@@ -8,9 +8,10 @@
 """
 from typing import TypedDict
 import re
+import time
 
 from ai_app1.core.logger import session_logger
-from ai_app1.service.vector_store import query_db
+from ai_app1.service.vector_store import query_db, LOW_CONFIDENCE_CE_THRESHOLD
 from ai_app1.service.query_rewriter import rewrite_queries
 
 class SessionData(TypedDict):
@@ -23,7 +24,13 @@ class SessionData(TypedDict):
 
 # ─── 配置常量 ───────────────────────────────────────────────
 MAX_HISTORY = 4                  # 保留在 history 中的最近消息条数
-SYSTEM_PROMPT = "你是一个专业的Android开发助手，回答要简洁、准确"
+SYSTEM_PROMPT = (
+    "你是 Android 开发助手。严格遵守：\n"
+    "1. 答案控制在 300 字以内，分 3-5 个要点；\n"
+    "2. 优先用参考资料中的原文，不要展开扩写；\n"
+    "3. 不输出大段示例代码，需要时给关键 API 名即可；\n"
+    "4. 不要客套话和总结段落。"
+)
 DEFAULT_TOKEN_BUDGET = 4096      # 约等于 MiniMax-M2 context 的一半
 
 
@@ -139,15 +146,48 @@ def build_messages_raw(session: SessionData) -> list:
     return messages
 
 
+def _retrieve_with_rewrite(query: str, history: list) -> dict:
+    """
+    经典串行检索：rewrite → 多路召回 → 返回 {context, top_ce, n_chunks}。
+
+    流程：
+      1. rewrite_queries 生成 1~4 条 query（Rewrite Router 三级分流）
+      2. query_db(return_meta=True) 跑多路召回 + RRF + Rerank + Lost-in-Middle
+      3. 返回带 top_ce 置信度的字典，调用方据此决定是否走低置信度兜底
+
+    rewrite 失败时降级使用原 query（保证可用性）。
+    """
+    from ai_app1.service.query_rewriter import RewriteQuery
+
+    t0 = time.perf_counter()
+    try:
+        queries = rewrite_queries(query, history)
+    except Exception as e:
+        session_logger.warning(f"rewrite 失败，降级用原 query: {e}")
+        queries = [RewriteQuery(text=query, type="original", weight=1.0,
+                                routes=["dense", "hyde", "bm25"])]
+    t_rewrite_ms = (time.perf_counter() - t0) * 1000
+
+    t1 = time.perf_counter()
+    meta = query_db(queries, return_meta=True) or {"context": None, "top_ce": 0.0, "n_chunks": 0}
+    t_retrieve_ms = (time.perf_counter() - t1) * 1000
+
+    session_logger.info(
+        f"[串行rewrite→召回] rewrite={t_rewrite_ms:.0f}ms ({len(queries)} 条), "
+        f"召回={t_retrieve_ms:.0f}ms, 总={(t_rewrite_ms + t_retrieve_ms):.0f}ms, "
+        f"top_ce={meta.get('top_ce', 0.0):.3f}, n_chunks={meta.get('n_chunks', 0)}"
+    )
+    return meta
+
+
 def build_messages(session: SessionData, req_msg: str) -> list:
     """
     构建完整的发送给 run_agent 的 messages 列表。
 
     包含：raw messages + 压缩提示（若 token 超预算）+ 向量库检索结果
 
-    Args:
-        session: 当前会话
-        req_msg: 用户原始请求消息，用于检索相关文档
+    低置信度兜底：当 top_ce < LOW_CONFIDENCE_CE_THRESHOLD 时，不喂检索片段，
+    改为追加明确指令告诉 LLM「知识库无相关内容」，避免基于不相关片段产生幻觉。
     """
     messages = build_messages_raw(session)
 
@@ -158,13 +198,36 @@ def build_messages(session: SessionData, req_msg: str) -> list:
             "content": "【注意】对话即将超出上下文限制，请先简洁总结之前的关键信息，再继续回答。"
         })
 
-    queries = rewrite_queries(req_msg, session["history"])
-    context = query_db(queries)
-    if context:
+    meta = _retrieve_with_rewrite(req_msg, session["history"])
+    context = meta.get("context")
+    top_ce = meta.get("top_ce", 0.0)
+    n_chunks = meta.get("n_chunks", 0)
+
+    if context and top_ce >= LOW_CONFIDENCE_CE_THRESHOLD:
         messages.append({"role": "user", "content": f"参考资料：{context}"})
-        session_logger.info(f"追加参考资料: {context[:50]}...")
+        session_logger.info(f"追加参考资料 ({n_chunks} 片段, top_ce={top_ce:.3f}): {context[:50]}...")
+    elif context and top_ce < LOW_CONFIDENCE_CE_THRESHOLD:
+        session_logger.warning(
+            f"低置信度检索 (top_ce={top_ce:.3f} < {LOW_CONFIDENCE_CE_THRESHOLD})，"
+            f"触发拒答提示，跳过参考资料"
+        )
+        messages.append({
+            "role": "user",
+            "content": (
+                "【知识库提示】本次问题在 Android 开发知识库中未找到强相关内容。"
+                "请直接回复用户：『抱歉，这个问题超出了我当前 Android 知识库的覆盖范围，"
+                "建议提供更多上下文或换个问法。』不要凭通用知识展开回答。"
+            )
+        })
     else:
-        session_logger.debug(f"未检索到相关文档: {req_msg[:30]}")
+        session_logger.warning(f"未检索到任何文档: {req_msg[:30]}")
+        messages.append({
+            "role": "user",
+            "content": (
+                "【知识库提示】检索引擎未返回任何文档。请直接回复用户："
+                "『抱歉，知识库目前没有相关资料，请稍后重试或换个问题。』"
+            )
+        })
 
     session_logger.info(f"构建最终 messages: {len(messages)} 条")
     return messages
