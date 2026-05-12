@@ -37,14 +37,14 @@ _PROJECT_ROOT = Path(__file__).parent.parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-from ai_app1.service.AiClient import AiClient
+from ai_app1.service.ai_client import AiClient
 from ai_app1.service.session import build_messages, get_session, add_user_message
 from ai_app1.core.config import OPENAI_API_KEY
 
 
 # ─── 评测集加载 ───────────────────────────────────────────────────────────────
 
-_QA_BENCHMARK = Path(__file__).parent / "qa_benchmark.json"
+_QA_BENCHMARK = Path(__file__).parent / "data" / "qa_benchmark.json"
 
 
 def _load_qa_dataset(path: Path = _QA_BENCHMARK) -> list[dict]:

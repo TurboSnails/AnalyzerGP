@@ -12,8 +12,8 @@ Phase 2 验收测试：验证混合检索（Dense + HyDE + BM25 + RRF）
 """
 import sys
 import logging
-from ai_app1.service import bm25_store
-from ai_app1.service.vector_store import (
+from ai_app1.retrieval import bm25_store
+from ai_app1.retrieval.vector_store import (
     _get_collection,
     _rrf_merge,
     _query_dense,

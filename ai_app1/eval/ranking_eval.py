@@ -35,14 +35,14 @@ from ai_app1.eval.metrics import (
     reciprocal_rank,
     hit_at_k,
 )
-from ai_app1.service.vector_store import query_db_structured, RetrievalConfig
-from ai_app1.service.query_rewriter import rewrite_queries
+from ai_app1.retrieval.vector_store import query_db_structured, RetrievalConfig
+from ai_app1.retrieval.query_rewriter import rewrite_queries
 
 
 # ─── 评测集加载 ───────────────────────────────────────────────────────────────
 
 _EVAL_FILE = Path(__file__).parent / "评测集"
-_HARD_CASES_FILE = Path(__file__).parent / "hard_cases.json"
+_HARD_CASES_FILE = Path(__file__).parent / "data" / "hard_cases.json"
 
 
 def _load_dataset(path: Path) -> list[dict]:
@@ -138,7 +138,7 @@ def evaluate_single_query(
         queries = rewrite_queries(query, history=[])
         t_rewrite = (time.perf_counter() - t0) * 1000
     else:
-        from ai_app1.service.query_rewriter import RewriteQuery
+        from ai_app1.retrieval.query_rewriter import RewriteQuery
         queries = [RewriteQuery(text=query, type="original", weight=1.0,
                                 routes=["dense", "hyde", "bm25"])]
 

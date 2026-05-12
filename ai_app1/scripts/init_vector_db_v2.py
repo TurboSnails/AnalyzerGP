@@ -18,7 +18,7 @@ import openai
 import chromadb
 from dotenv import load_dotenv
 
-from ai_app1.service.embedding import BgeM3EmbeddingService, get_embedding_service
+from ai_app1.retrieval.embedding import BgeM3EmbeddingService, get_embedding_service
 
 try:
     import psutil

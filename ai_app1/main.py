@@ -26,10 +26,10 @@ app.mount("/ui", StaticFiles(directory=_static, html=True), name="static")
 @app.on_event("startup")
 async def preload_models():
     """启动时预热所有模型和索引，避免首个请求承担懒加载成本。"""
-    from ai_app1.service.embedding import get_embedding_service
-    from ai_app1.service.reranker import _get_reranker_service
-    from ai_app1.service.bm25_store import search as bm25_search
-    from ai_app1.service.query_rewriter import preload as preload_rewriter
+    from ai_app1.retrieval.embedding import get_embedding_service
+    from ai_app1.retrieval.reranker import _get_reranker_service
+    from ai_app1.retrieval.bm25_store import search as bm25_search
+    from ai_app1.retrieval.query_rewriter import preload as preload_rewriter
 
     await asyncio.to_thread(get_embedding_service()._ensure_model)
     await asyncio.to_thread(_get_reranker_service()._ensure_model)
@@ -48,5 +48,5 @@ def root():
 @app.get("/debug/rewrite_cache")
 def debug_rewrite_cache():
     """暴露 rewrite LRU 缓存命中统计，用于调优 Rewrite Router 阈值。"""
-    from ai_app1.service.query_rewriter import cache_stats
+    from ai_app1.retrieval.query_rewriter import cache_stats
     return cache_stats()

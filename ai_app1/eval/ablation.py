@@ -32,7 +32,7 @@ _PROJECT_ROOT = Path(__file__).parent.parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-from ai_app1.service.vector_store import RetrievalConfig
+from ai_app1.retrieval.vector_store import RetrievalConfig
 from ai_app1.eval.ranking_eval import run_ranking_eval, _EVAL_FILE
 from ai_app1.eval.metrics import EvalMetrics
 

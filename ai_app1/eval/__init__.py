@@ -29,7 +29,7 @@ ai_app1.eval — RAG Evaluation Platform
     # uv run python -m ai_app1.eval.experiment all
 
     # 4. 自定义配置评测
-    from ai_app1.service.vector_store import RetrievalConfig
+    from ai_app1.retrieval.vector_store import RetrievalConfig
     from ai_app1.eval.ranking_eval import run_ranking_eval
     cfg = RetrievalConfig(enable_hyde=False)
     metrics = run_ranking_eval(config=cfg)

@@ -3,10 +3,11 @@ from dotenv import load_dotenv
 load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-CHROMA_DB_PATH = "/Users/hassan/Documents/workspace/aiFile/fenxiCB/ai_app1/pre/chroma_db"
 
 _AI_APP_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _REPO_ROOT = os.path.dirname(_AI_APP_ROOT)
+
+CHROMA_DB_PATH = os.getenv("CHROMA_DB_PATH", "").strip() or os.path.join(_AI_APP_ROOT, "data", "chroma_db")
 
 
 def _resolve_bge_m3_path() -> str:

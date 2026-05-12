@@ -19,7 +19,7 @@ from pydantic import BaseModel
 
 from ai_app1.core.config import OPENAI_API_KEY
 from ai_app1.core.logger import chat_logger
-from ai_app1.service.AiClient import AiClient
+from ai_app1.service.ai_client import AiClient
 from ai_app1.service.session import (
     get_session,
     add_user_message,

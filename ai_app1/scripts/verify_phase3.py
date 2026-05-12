@@ -12,8 +12,8 @@ Phase 3 验收测试：验证 Rerank + Lost-in-Middle 效果
 """
 import sys
 import logging
-from ai_app1.service import bm25_store
-from ai_app1.service.vector_store import (
+from ai_app1.retrieval import bm25_store
+from ai_app1.retrieval.vector_store import (
     _get_collection,
     _rrf_merge,
     _query_dense,
@@ -22,7 +22,7 @@ from ai_app1.service.vector_store import (
     BM25_TOP_K,
     RERANK_TOP_K,
 )
-from ai_app1.service.reranker import rerank_chunks, reorder_lost_in_middle
+from ai_app1.retrieval.reranker import rerank_chunks, reorder_lost_in_middle
 
 logging.basicConfig(
     level=logging.INFO,
@@ -149,7 +149,7 @@ def run() -> bool:
     # ── 完整管道冒烟测试 ──────────────────────────────────────────────────────
     logger.info(f"\n{'─' * 50}")
     logger.info("完整管道 query_db() 冒烟测试:")
-    from ai_app1.service.vector_store import query_db
+    from ai_app1.retrieval.vector_store import query_db
     for q in TEST_QUERIES:
         result = query_db(q)
         ok = result is not None and len(result) > 50

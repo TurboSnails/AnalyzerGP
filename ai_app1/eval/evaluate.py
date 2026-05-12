@@ -105,7 +105,7 @@ def run_eval(top_k_label: str = "5") -> None:
     print(f"{'─'*60}\n")
 
     # 延迟导入，避免模型在 import 时就加载
-    from ai_app1.service.vector_store import query_db
+    from ai_app1.retrieval.vector_store import query_db
 
     for i, item in enumerate(dataset, 1):
         query    = item["query"]
@@ -171,8 +171,8 @@ def run_structured_eval(
             "details": [...],
         }
     """
-    from ai_app1.service.vector_store import query_db_structured, RetrievalConfig
-    from ai_app1.service.query_rewriter import rewrite_queries
+    from ai_app1.retrieval.vector_store import query_db_structured, RetrievalConfig
+    from ai_app1.retrieval.query_rewriter import rewrite_queries
     from ai_app1.eval.metrics import aggregate_metrics
 
     dataset = _load_dataset()
@@ -202,7 +202,7 @@ def run_structured_eval(
             queries = rewrite_queries(query, history=[])
             t_rewrite = (time.perf_counter() - t0) * 1000
         else:
-            from ai_app1.service.query_rewriter import RewriteQuery
+            from ai_app1.retrieval.query_rewriter import RewriteQuery
             queries = [RewriteQuery(text=query, type="original", weight=1.0,
                                     routes=["dense", "hyde", "bm25"])]
 

@@ -3,7 +3,7 @@ import re
 import shutil
 import chromadb
 from ai_app1.core.config import CHROMA_DB_PATH
-from ai_app1.service.embedding import get_embedding_service
+from ai_app1.retrieval.embedding import get_embedding_service
 
 
 def get_project_root() -> str:

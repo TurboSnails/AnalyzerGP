@@ -20,8 +20,8 @@ import time
 from concurrent.futures import ThreadPoolExecutor, Future
 import chromadb
 from ai_app1.core.config import CHROMA_DB_PATH
-from ai_app1.service.embedding import get_embedding_service
-from ai_app1.service.query_rewriter import RewriteQuery
+from ai_app1.retrieval.embedding import get_embedding_service
+from ai_app1.retrieval.query_rewriter import RewriteQuery
 
 logger = logging.getLogger("vector_store")
 
@@ -218,8 +218,8 @@ def query_db(
 
     original_query = queries[0].text
 
-    from ai_app1.service import bm25_store
-    from ai_app1.service.reranker import rerank_chunks, reorder_lost_in_middle
+    from ai_app1.retrieval import bm25_store
+    from ai_app1.retrieval.reranker import rerank_chunks, reorder_lost_in_middle
 
     col_parent = _get_collection("android_parent")
     col_child  = _get_collection("android_child")
@@ -460,8 +460,8 @@ def query_db_structured(
     original_query = queries[0].text
     result.query_count = len(queries)
 
-    from ai_app1.service import bm25_store
-    from ai_app1.service.reranker import rerank_chunks, reorder_lost_in_middle
+    from ai_app1.retrieval import bm25_store
+    from ai_app1.retrieval.reranker import rerank_chunks, reorder_lost_in_middle
 
     col_parent = _get_collection("android_parent")
     col_child  = _get_collection("android_child")

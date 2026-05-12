@@ -41,7 +41,7 @@ load_dotenv(Path(__file__).resolve().parent.parent / ".env", override=True)
 
 from hf_snapshot_downloader import DEFAULT_CN_MIRROR, HfSnapshotDownloader  # noqa: E402
 
-from ai_app1.service.reranker import BgeRerankerService  # noqa: E402
+from ai_app1.retrieval.reranker import BgeRerankerService  # noqa: E402
 
 
 DEFAULT_REPO = os.getenv("RERANKER_REPO_ID", "BAAI/bge-reranker-base")

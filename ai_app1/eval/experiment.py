@@ -40,7 +40,7 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 from ai_app1.eval.metrics import EvalMetrics
-from ai_app1.service.vector_store import RetrievalConfig
+from ai_app1.retrieval.vector_store import RetrievalConfig
 
 
 # ─── 路径常量 ─────────────────────────────────────────────────────────────────
@@ -88,7 +88,7 @@ def _run_ablation() -> dict:
 def _run_hard_cases() -> dict:
     """运行困难样本专项评测。"""
     from ai_app1.eval.ranking_eval import run_ranking_eval
-    hard_path = _EVAL_DIR / "hard_cases.json"
+    hard_path = _EVAL_DIR / "data" / "hard_cases.json"
     metrics = run_ranking_eval(
         dataset_path=hard_path,
         verbose=False,

@@ -1,5 +1,5 @@
 """
-会话管理模块：维护用户对话历史、摘要压缩和文档检索。
+会话管理模块：维护用户对话历史和摘要压缩。
 
 设计思路：
 - 每个 user_id 对应一个 SessionData（内存字典，进程重启后丢失）
@@ -11,8 +11,8 @@ import re
 import time
 
 from ai_app1.core.logger import session_logger
-from ai_app1.service.vector_store import query_db, LOW_CONFIDENCE_CE_THRESHOLD
-from ai_app1.service.query_rewriter import rewrite_queries
+from ai_app1.retrieval import retrieve
+from ai_app1.retrieval.vector_store import LOW_CONFIDENCE_CE_THRESHOLD
 
 class SessionData(TypedDict):
     """会话数据结构，所有字段均为进程内内存存储"""
@@ -146,39 +146,6 @@ def build_messages_raw(session: SessionData) -> list:
     return messages
 
 
-def _retrieve_with_rewrite(query: str, history: list) -> dict:
-    """
-    经典串行检索：rewrite → 多路召回 → 返回 {context, top_ce, n_chunks}。
-
-    流程：
-      1. rewrite_queries 生成 1~4 条 query（Rewrite Router 三级分流）
-      2. query_db(return_meta=True) 跑多路召回 + RRF + Rerank + Lost-in-Middle
-      3. 返回带 top_ce 置信度的字典，调用方据此决定是否走低置信度兜底
-
-    rewrite 失败时降级使用原 query（保证可用性）。
-    """
-    from ai_app1.service.query_rewriter import RewriteQuery
-
-    t0 = time.perf_counter()
-    try:
-        queries = rewrite_queries(query, history)
-    except Exception as e:
-        session_logger.warning(f"rewrite 失败，降级用原 query: {e}")
-        queries = [RewriteQuery(text=query, type="original", weight=1.0,
-                                routes=["dense", "hyde", "bm25"])]
-    t_rewrite_ms = (time.perf_counter() - t0) * 1000
-
-    t1 = time.perf_counter()
-    meta = query_db(queries, return_meta=True) or {"context": None, "top_ce": 0.0, "n_chunks": 0}
-    t_retrieve_ms = (time.perf_counter() - t1) * 1000
-
-    session_logger.info(
-        f"[串行rewrite→召回] rewrite={t_rewrite_ms:.0f}ms ({len(queries)} 条), "
-        f"召回={t_retrieve_ms:.0f}ms, 总={(t_rewrite_ms + t_retrieve_ms):.0f}ms, "
-        f"top_ce={meta.get('top_ce', 0.0):.3f}, n_chunks={meta.get('n_chunks', 0)}"
-    )
-    return meta
-
 
 def build_messages(session: SessionData, req_msg: str) -> list:
     """
@@ -198,7 +165,7 @@ def build_messages(session: SessionData, req_msg: str) -> list:
             "content": "【注意】对话即将超出上下文限制，请先简洁总结之前的关键信息，再继续回答。"
         })
 
-    meta = _retrieve_with_rewrite(req_msg, session["history"])
+    meta = retrieve(req_msg, session["history"])
     context = meta.get("context")
     top_ce = meta.get("top_ce", 0.0)
     n_chunks = meta.get("n_chunks", 0)
