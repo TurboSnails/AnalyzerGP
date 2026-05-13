@@ -1,0 +1,90 @@
+一、 架构设计：别把 Activity 当成“全能管家”
+很多初学者最容易犯的错误就是把所有的逻辑（UI 逻辑、业务逻辑、网络请求）都写在 Activity 或 Fragment 里。
+
+解耦是核心： 推荐使用 MVVM（ViewModel + LiveData/Flow）架构。Activity 只负责显示 UI 和监听用户交互，业务逻辑交给 ViewModel，数据获取交给 Repository。
+
+生命周期管理： 必须深刻理解 Activity 的生命周期。尤其是在异步回调中，一定要检查 UI 组件是否已经销毁。使用 lifecycleScope 或 viewModelScope 来自动管理协程，防止内存泄漏。
+
+单一职责原则： 一个类只做一件事。如果你的 Activity 超过 1000 行，那就说明该重构了。
+
+二、 内存优化：告别 OOM（内存溢出）
+Android 设备的内存资源是有限的，内存泄漏是应用卡顿甚至崩溃的元凶。
+
+静态变量的风险： 严禁在静态变量中持有 Context、View 或 Activity 的引用。这会导致 Activity 即使销毁了也无法被 GC 回收。
+
+内部类与匿名内部类： 非静态内部类（如老的 Handler 写法）会隐式持有外部类的引用。建议使用静态内部类 + 弱引用（WeakReference）。
+
+大图处理： 图片是内存消耗大户。
+
+不要直接加载原图： 必须根据 View 的实际大小进行压缩（采样率压缩）。
+
+使用成熟库： 推荐使用 Glide 或 Coil，它们会自动处理缓存和内存回收。
+
+资源关闭： Cursor、File、Stream 等 IO 对象在使用完后必须在 finally 块或通过 use 扩展函数关闭。
+
+三、 线程与异步：UI 线程是“禁区”
+UI 线程（主线程）如果阻塞超过 5 秒，系统就会抛出 ANR（应用无响应）。
+
+耗时操作： 网络请求、数据库读写、复杂算法、大图解码等必须放在子线程执行。
+
+Kotlin 协程（Coroutines）： 它是目前 Android 异步处理的最佳实践。利用 Dispatchers.Main 更新 UI，Dispatchers.IO 处理耗时任务，代码逻辑像同步代码一样清晰。
+
+线程切换： 严禁在子线程直接更新 UI。必须通过 withContext(Dispatchers.Main) 或 post 到主线程。
+
+四、 UI 与布局优化：让应用“丝滑”起来
+减少布局层级： 过深的布局嵌套会导致视图树测量次数指数级增长。
+
+使用 ConstraintLayout（约束布局）实现扁平化。
+
+使用 <merge> 标签减少多余层级，使用 <ViewStub> 按需加载布局。
+
+列表优化（RecyclerView）：
+
+使用 DiffUtil 来计算列表差异，避免全局刷新 notifyDataSetChanged()。
+
+保持 onBindViewHolder 逻辑精简，不要在这里做耗时计算或创建对象。
+
+过度绘制（Overdraw）： 检查你的布局背景。如果子 View 已经覆盖了父 View，就不要给父 View 设置背景颜色。
+
+五、 数据存储：选择最合适的容器
+SharedPreferences： 仅适用于存储极少量的配置信息。它是同步写入磁盘的，存大数据会导致卡顿甚至 ANR。
+
+DataStore： 谷歌推荐的 SP 替代方案，基于协程和 Flow，支持异步处理，更安全。
+
+Room 数据库： 处理结构化本地数据的不二之选。它是对 SQLite 的封装，提供了编译时的 SQL 检查。注意： 严禁在主线程访问数据库。
+
+六、 系统适配：碎片化的挑战
+Android 的碎片化是开发者永远的痛。
+
+权限管理： Android 6.0 以后需要动态申请危险权限。必须处理用户拒绝权限、点击“不再询问”后的逻辑引导。
+
+版本适配：
+
+Android 10+ (Scoped Storage)： 适配分区存储，不能再随意读写根目录。
+
+Android 12+： 适配启动页 API、精确闹钟权限等。
+
+Android 13+： 适配通知权限、细分媒体权限。
+
+屏幕适配： 避免使用绝对像素 px，统一使用 dp 和 sp。使用资源限定符（如 layout-sw600dp）适配平板。
+
+七、 网络请求：安全与效率并重
+HTTPS： 默认强制使用 HTTPS，不要在代码中关闭证书校验（这会导致中间人攻击）。
+
+Retrofit + OkHttp： 目前最流行的网络组合。利用 OkHttp 的拦截器（Interceptor）统一处理 Token、Log 打印和缓存策略。
+
+弱网处理： 必须设置合理的超时时间，并给用户提供友好的重试机制。
+
+八、 混淆与安全
+代码混淆（R8/Proguard）： 上线前必须开启混淆，不仅可以减小 APK 体积，还能增加代码被反编译的难度。
+
+敏感信息加密： 不要把 API Key、私钥等硬编码在代码里。建议放在 local.properties 中或使用 Native 层加密存储。
+
+九、 性能分析工具
+学会使用 Android Studio Profiler。
+
+CPU Profiler： 查看哪个方法最耗时。
+
+Memory Profiler： 实时观察内存抖动和泄露。
+
+Network Inspector： 监控网络请求的流量和响应。

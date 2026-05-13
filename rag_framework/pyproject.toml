@@ -1,0 +1,23 @@
+[project]
+name = "rag-framework"
+version = "0.1.0"
+description = "通用 RAG 框架，支持插件化领域扩展"
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic>=2.0",
+    "pydantic-settings>=2.0",
+    "openai>=1.0",
+    "sentence-transformers>=3.0",
+    "chromadb>=0.5",
+    "tantivy>=0.21",
+    "jieba>=0.42",
+    "httpx>=0.27",
+]
+
+[tool.uv]
+dev-dependencies = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "mypy>=1.9",
+    "ruff>=0.4",
+]

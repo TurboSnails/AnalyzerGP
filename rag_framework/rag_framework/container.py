@@ -1,0 +1,141 @@
+"""
+RAG 依赖注入容器
+
+替代全局单例，统一管理所有组件的生命周期。
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any
+
+from rag_framework.core.config import RAGSettings
+from rag_framework.core.logger import setup_logging
+from rag_framework.core.registry import get_domain
+from rag_framework.domain.base import DomainPlugin
+from rag_framework.embedding.base import Embedder
+from rag_framework.embedding.sentence_transformer import STEmbedder
+from rag_framework.llm.base import LLMClient
+from rag_framework.llm.openai_client import OpenAILLMClient
+from rag_framework.rerank.base import Reranker
+from rag_framework.rerank.cross_encoder import CrossEncoderReranker
+from rag_framework.retrieval.dense import DenseStore
+from rag_framework.retrieval.sparse import BM25Store
+from rag_framework.retrieval.fusion import HybridRetriever
+from rag_framework.session.base import SessionStore
+from rag_framework.session.memory_store import MemorySessionStore
+
+
+@dataclass
+class RAGContainer:
+    """
+    RAG 依赖注入容器。
+
+    组合所有框架组件，提供统一访问入口。
+    """
+    settings: RAGSettings
+    embedder: Embedder
+    dense_store: DenseStore
+    sparse_store: BM25Store
+    retriever: HybridRetriever
+    reranker: Reranker
+    llm: LLMClient
+    session_store: SessionStore
+    domain: DomainPlugin
+
+    @classmethod
+    def from_settings(cls, settings: RAGSettings | None = None) -> "RAGContainer":
+        """
+        从配置构建完整容器。
+
+        自动初始化日志、加载模型、建立数据库连接。
+        """
+        settings = settings or RAGSettings()
+        setup_logging(level=settings.log_level)
+
+        # Embedding
+        embedder = STEmbedder(
+            model_path=settings.embed_model_path,
+            device=settings.embed_device,
+            normalize=settings.embed_normalize,
+        )
+
+        # Dense Store
+        dense_store = DenseStore(
+            chroma_path=settings.chroma_db_path,
+            embedder=embedder,
+        )
+
+        # Sparse Store
+        sparse_store = BM25Store(
+            index_dir=settings.bm25_index_dir,
+            chroma_path=settings.chroma_db_path,
+        )
+
+        # Reranker
+        reranker = CrossEncoderReranker(
+            model_path=settings.reranker_model_path,
+            max_length=settings.reranker_max_length,
+            batch_size=settings.reranker_batch_size,
+        )
+
+        # LLM
+        llm = OpenAILLMClient(
+            base_url=settings.llm_base_url,
+            api_key=settings.resolved_llm_api_key,
+            model=settings.llm_model,
+            backend=settings.llm_backend,
+            max_tokens=settings.llm_max_tokens,
+        )
+
+        # Session
+        session_store = MemorySessionStore(
+            default_budget=settings.default_token_budget,
+        )
+
+        # Domain
+        domain = get_domain(settings.active_domain)
+
+        # Hybrid Retriever (依赖 domain 的 collection names)
+        retriever = HybridRetriever(
+            settings=settings,
+            embedder=embedder,
+            dense_store=dense_store,
+            sparse_store=sparse_store,
+            reranker=reranker,
+            domain=domain,
+        )
+
+        return cls(
+            settings=settings,
+            embedder=embedder,
+            dense_store=dense_store,
+            sparse_store=sparse_store,
+            retriever=retriever,
+            reranker=reranker,
+            llm=llm,
+            session_store=session_store,
+            domain=domain,
+        )
+
+    # ─── 快捷方法 ───────────────────────────────────────────────────────────────
+
+    async def chat_stream(
+        self, query: str, user_id: str = "default_user"
+    ):
+        """
+        端到端流式对话入口。
+
+        1. 获取/创建 session
+        2. 构建 messages（system + summary + history + retrieved context）
+        3. 流式调用 LLM
+        """
+        from rag_framework.session.manager import SessionManager
+        manager = SessionManager(
+            store=self.session_store,
+            llm=self.llm,
+            retriever=self.retriever,
+            domain=self.domain,
+            settings=self.settings,
+        )
+        async for chunk in manager.chat_stream(query, user_id):
+            yield chunk

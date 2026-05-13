@@ -1,3 +1,9 @@
+"""
+ai_app1 — Android 开发助手（薄应用层）
+
+基于 rag_framework + AndroidDomainPlugin 构建。
+仅负责 HTTP 服务启动、静态文件、CORS 等 Web 层职责。
+"""
 import asyncio
 from pathlib import Path
 
@@ -8,7 +14,7 @@ from fastapi.staticfiles import StaticFiles
 
 from ai_app1.api.chat import router as chat_router
 
-app = FastAPI()
+app = FastAPI(title="Android 开发助手", version="2.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -25,17 +31,24 @@ app.mount("/ui", StaticFiles(directory=_static, html=True), name="static")
 
 @app.on_event("startup")
 async def preload_models():
-    """启动时预热所有模型和索引，避免首个请求承担懒加载成本。"""
-    from ai_app1.retrieval.embedding import get_embedding_service
-    from ai_app1.retrieval.reranker import _get_reranker_service
-    from ai_app1.retrieval.bm25_store import search as bm25_search
-    from ai_app1.retrieval.query_rewriter import preload as preload_rewriter
+    """启动时注册领域插件并预热模型和索引。"""
+    from rag_framework.container import RAGContainer
+    from rag_framework.core.config import get_settings
+    from rag_framework.core.registry import register_domain
+    from android_domain import AndroidDomainPlugin
 
-    await asyncio.to_thread(get_embedding_service()._ensure_model)
-    await asyncio.to_thread(_get_reranker_service()._ensure_model)
-    await asyncio.to_thread(preload_rewriter)
-    # 触发 BM25 索引加载（空查询会快速返回，但会完成索引初始化）
-    await asyncio.to_thread(bm25_search, "", 1)
+    # 注册 Android 领域插件
+    register_domain(AndroidDomainPlugin)
+
+    settings = get_settings()
+    container = RAGContainer.from_settings(settings)
+
+    # 预热 embedding
+    await asyncio.to_thread(container.embedder._ensure_model)
+    # 预热 reranker
+    await asyncio.to_thread(container.reranker._ensure_model)
+    # 预热 BM25
+    await asyncio.to_thread(container.sparse_store._ensure_loaded)
 
     print("[startup] 所有模型和索引预热完成")
 
@@ -45,8 +58,6 @@ def root():
     return FileResponse(_static / "index.html")
 
 
-@app.get("/debug/rewrite_cache")
-def debug_rewrite_cache():
-    """暴露 rewrite LRU 缓存命中统计，用于调优 Rewrite Router 阈值。"""
-    from ai_app1.retrieval.query_rewriter import cache_stats
-    return cache_stats()
+@app.get("/health")
+def health():
+    return {"status": "ok", "version": "2.0.0"}

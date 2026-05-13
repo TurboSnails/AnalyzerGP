@@ -1,139 +1,70 @@
 """
-Chat API 路由：处理 /chat POST 请求。
+Chat API 路由 — 基于 rag_framework 的流式对话接口
 
-请求流程：
-    1. 接收用户消息，加入会话 history
-    2. 构建 messages（系统提示 + 摘要 + 历史 + 文档检索结果）
-    3. 调用 run_agent 获取 AI 回复
-    4. AI 回复后判断是否需要 summarize（token 预算耗尽触发）
-    5. 裁剪 history 到 MAX_HISTORY 条
-    6. 返回 AI 回复
+职责：
+  1. 接收用户消息
+  2. 通过 RAGContainer 调用流式对话
+  3. 返回 StreamingResponse
 
-AiClient 使用进程级单例，避免重复创建 OpenAI 客户端实例。
+所有业务逻辑（检索、LLM、会话管理）均在框架层处理。
 """
 import asyncio
 import time
+from typing import AsyncIterator
+
 from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from ai_app1.core.config import OPENAI_API_KEY
-from ai_app1.core.logger import chat_logger
-from ai_app1.service.ai_client import AiClient
-from ai_app1.service.session import (
-    get_session,
-    add_user_message,
-    add_assistant_message,
-    update_summary,
-    trim_history,
-    build_messages,
-    should_summarize,
-)
+from rag_framework.container import RAGContainer
+from rag_framework.core.config import get_settings
+from rag_framework.core.logger import chat_logger
 
 router = APIRouter()
 
-# ─── AiClient 单例 ───────────────────────────────────────────
-# 懒汉式单例：进程内全局共享，复用 HTTP 连接池
-_ai_client: AiClient | None = None
+# 全局容器（进程级单例）
+_container: RAGContainer | None = None
 
 
-def get_ai_client() -> AiClient:
-    """
-    获取或创建 AiClient 单例。
-
-    首次调用时创建实例，后续调用直接返回，节省每次请求创建客户端的开销。
-    """
-    global _ai_client
-    if _ai_client is None:
-        _ai_client = AiClient(ai_api_key=OPENAI_API_KEY)
-        chat_logger.info(f"AiClient 单例初始化完成: id={id(_ai_client)}")
-    return _ai_client
+def get_container() -> RAGContainer:
+    global _container
+    if _container is None:
+        _container = RAGContainer.from_settings(get_settings())
+    return _container
 
 
 class ChatRequest(BaseModel):
-    """POST /chat 请求体"""
     message: str
+    user_id: str = "default_user"
 
 
 @router.post("/chat")
-async def chat(req: ChatRequest, ai_client: AiClient = Depends(get_ai_client)):
+async def chat(req: ChatRequest, container: RAGContainer = Depends(get_container)):
     """
-    处理用户聊天请求的主入口。流式响应，用户首个 token 即可见。
+    流式聊天接口。
 
-    Args:
-        req: 包含 message 字段的请求体
-        ai_client: 通过 Depends 注入的 AiClient 单例
-
-    Returns:
-        StreamingResponse 流式输出 AI 回复
+    请求：{ "message": "...", "user_id": "..." }
+    响应：text/plain 流式输出
     """
     req_id = id(req)
-    chat_logger.info(f"[{req_id}] 收到请求: message={req.message[:50]!r}")
+    chat_logger.info(f"[{req_id}] 收到请求: message={req.message[:50]!r}, user={req.user_id}")
     start = time.monotonic()
 
-    user_id = "default_user"
-
-    t_session = time.monotonic()
-    session = get_session(user_id)
-    chat_logger.debug(f"[{req_id}] 获取 session: history_len={len(session['history'])}, summary={'有' if session['summary'] else '无'}")
-
-    add_user_message(session, req.message)
-    chat_logger.debug(f"[{req_id}] 用户消息已添加: history_len={len(session['history'])}")
-
-    t_before_build = time.monotonic()
-    messages = await asyncio.to_thread(build_messages, session, req.message)
-    t_after_build = time.monotonic()
-    prompt_chars = sum(len(str(m.get("content", ""))) for m in messages)
-    chat_logger.info(
-        f"[{req_id}] 本地耗时分解: session={1000*(t_before_build-t_session):.0f}ms, "
-        f"build_messages={1000*(t_after_build-t_before_build):.0f}ms, "
-        f"本地总={1000*(t_after_build-start):.0f}ms, "
-        f"prompt_chars={prompt_chars}, msgs={len(messages)}"
-    )
-
-    # 3. 流式收集完整回复，同时流式 yield 给客户端
-    full_reply_parts: list[str] = []
-
-    async def background_maintain_session():
-        """流结束后在后台执行 summarize / trim，不阻塞用户下一条请求。"""
-        reply = "".join(full_reply_parts)
-        add_assistant_message(session, reply)
-        chat_logger.debug(f"[{req_id}] 助手消息已添加: history_len={len(session['history'])}")
-
-        if should_summarize(session):
-            chat_logger.info(f"[{req_id}] 开始 summarize")
-            try:
-                summary = await ai_client.summarize(session["history"])
-                update_summary(session, summary)
-                chat_logger.info(f"[{req_id}] summarize 完成: summary_len={len(summary)}")
-            except Exception as e:
-                chat_logger.error(f"[{req_id}] summarize 失败: {e}")
-        else:
-            chat_logger.debug(f"[{req_id}] 跳过 summarize: should_summarize=False")
-
-        trim_history(session)
-        chat_logger.debug(f"[{req_id}] trim_history 完成: history_len={len(session['history'])}, trimmed_len={len(session['trimmed'])}")
-
-    async def content_generator():
-        nonlocal messages
-        t_before_llm = time.monotonic()
-        chat_logger.info(f"[{req_id}] 即将调 LLM: 本地准备耗时={1000*(t_before_llm-start):.0f}ms")
+    async def content_generator() -> AsyncIterator[str]:
+        t_before = time.monotonic()
         first_chunk_logged = False
-        async for chunk in ai_client.stream_run_agent(messages):
+
+        async for chunk in container.chat_stream(req.message, req.user_id):
             if chunk:
                 if not first_chunk_logged:
                     chat_logger.info(
-                        f"[{req_id}] 收到 LLM 首字: TTFT(端到端)={1000*(time.monotonic()-t_before_llm):.0f}ms, "
-                        f"距请求到达={1000*(time.monotonic()-start):.0f}ms"
+                        f"[{req_id}] 收到 LLM 首字: "
+                        f"TTFT={1000*(time.monotonic()-t_before):.0f}ms"
                     )
                     first_chunk_logged = True
-                full_reply_parts.append(chunk)
                 yield chunk
 
         elapsed = time.monotonic() - start
-        chat_logger.info(f"[{req_id}] 流式传输完成: 总耗时={elapsed:.2f}")
-
-        # 启动后台任务维护 session（此时 full_reply_parts 已收集完毕）
-        asyncio.create_task(background_maintain_session())
+        chat_logger.info(f"[{req_id}] 流式传输完成: 总耗时={elapsed:.2f}s")
 
     return StreamingResponse(content_generator(), media_type="text/plain")
