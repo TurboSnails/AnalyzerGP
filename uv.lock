@@ -31,7 +31,7 @@ wheels = [
 [[package]]
 name = "android-domain"
 version = "0.1.0"
-source = { directory = "domains/android" }
+source = { editable = "domains/android" }
 dependencies = [
     { name = "rag-framework" },
 ]
@@ -485,7 +485,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "accelerate", specifier = ">=1.13.0" },
-    { name = "android-domain", directory = "domains/android" },
+    { name = "android-domain", editable = "domains/android" },
     { name = "anthropic", specifier = ">=0.97.0" },
     { name = "chromadb", specifier = ">=1.5.9" },
     { name = "export", specifier = ">=0.2.1" },
@@ -500,7 +500,7 @@ requires-dist = [
     { name = "pandas", specifier = ">=3.0.2" },
     { name = "pydantic", specifier = ">=2.13.3" },
     { name = "python-dotenv", specifier = ">=1.0.0" },
-    { name = "rag-framework", directory = "rag_framework" },
+    { name = "rag-framework", editable = "rag_framework" },
     { name = "sentence-transformers", specifier = ">=3.0.0" },
     { name = "tantivy", specifier = ">=0.26.0" },
     { name = "tokenizers", specifier = ">=0.22.0,<=0.23.0" },
@@ -2063,7 +2063,7 @@ wheels = [
 [[package]]
 name = "rag-framework"
 version = "0.1.0"
-source = { directory = "rag_framework" }
+source = { editable = "rag_framework" }
 dependencies = [
     { name = "chromadb" },
     { name = "httpx" },

@@ -32,6 +32,10 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 load_dotenv(Path(__file__).resolve().parent.parent / ".env", override=True)
 
+# 清理空字符串 HF_ENDPOINT，避免 huggingface_hub 模块导入时把它当作合法 endpoint
+if os.getenv("HF_ENDPOINT") == "":
+    del os.environ["HF_ENDPOINT"]
+
 from hf_snapshot_downloader import DEFAULT_CN_MIRROR, HfSnapshotDownloader  # noqa: E402
 
 
@@ -100,7 +104,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--no-mirror",
         action="store_true",
-        help="直连 Hugging Face（默认走镜像）",
+        help="直连 Hugging Face（默认官方 Hub；要镜像设 HF_ENDPOINT）",
     )
     parser.add_argument(
         "--skip-download",
@@ -111,9 +115,9 @@ def _parse_args() -> argparse.Namespace:
 
 
 def _resolve_endpoint(no_mirror: bool) -> str | None:
-    if not os.getenv("HF_ENDPOINT"):
-        if not no_mirror:
-            os.environ["HF_ENDPOINT"] = DEFAULT_CN_MIRROR
+    if no_mirror:
+        os.environ.pop("HF_ENDPOINT", None)
+        return None
     return os.getenv("HF_ENDPOINT") or None
 
 
@@ -143,6 +147,14 @@ def _resolve_retries(cli_val: int | None) -> int:
 
 def _is_transient_network_error(exc: BaseException) -> bool:
     name = exc.__class__.__name__
+    # 以下错误表示仓库不存在、文件缺失或 Hub 完全不可达，重试通常无效
+    if name in {
+        "LocalEntryNotFoundError",
+        "RepositoryNotFoundError",
+        "RevisionNotFoundError",
+        "EntryNotFoundError",
+    }:
+        return False
     if name in {
         "RemoteProtocolError", "ReadTimeout", "ConnectError", "ConnectTimeout",
         "PoolTimeout", "ReadError", "WriteError", "IncompleteRead",
@@ -182,7 +194,22 @@ def _download_with_retries(
         except SystemExit:
             raise
         except BaseException as exc:
-            if attempt >= retries or not _is_transient_network_error(exc):
+            if not _is_transient_network_error(exc):
+                # 非网络类错误直接抛出，并附带诊断提示
+                print(
+                    f"\n[error] 不可重试的错误 ({exc.__class__.__name__}): {exc}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                if "LocalEntryNotFoundError" in exc.__class__.__name__:
+                    print(
+                        "[hint] 该错误通常表示无法连接到 Hugging Face Hub 或镜像站，"
+                        "或仓库不存在。请检查网络、代理设置，或尝试 --no-mirror。",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                raise
+            if attempt >= retries:
                 raise
             attempt += 1
             wait = retry_wait * (2 ** (attempt - 1))
@@ -198,7 +225,7 @@ def _download_with_retries(
 
 
 def _ensure_model(args: argparse.Namespace) -> Path:
-    default_models_parent = Path(__file__).resolve().parent.parent / "models"
+    default_models_parent = _PROJECT_ROOT / "models"
     subdir = args.repo.split("/")[-1].lower()
     local_dir = (args.output_dir or default_models_parent / subdir).expanduser().resolve()
 

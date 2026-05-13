@@ -14,29 +14,120 @@
 
 默认（未设置 HF_ENDPOINT）使用大陆镜像 hf-mirror；要直连官方 Hub：加 --no-mirror。
 
-运行（当前工作目录不同，路径不同 —— 勿在 ai_app1 里再写一层 ai_app1/）：
-  仓库根 fenxiCB:     uv run python ai_app1/test/download_bge_m3.py
-                      uv run python ai_app1/run_download.py
-  已进入 ai_app1:     uv run python test/download_bge_m3.py
-                      uv run python run_download.py
+运行（仓库根 fenxiCB）：
+  uv run python ai_app1/scripts/download_bge_m3.py
+  uv run python ai_app1/scripts/download_bge_m3.py --no-mirror
 """
 
 from __future__ import annotations
 
 import argparse
 import os
+import sys
+import time
 from pathlib import Path
 
 from dotenv import load_dotenv
 
-from hf_snapshot_downloader import DEFAULT_CN_MIRROR, HfSnapshotDownloader, PRESETS
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
 
-# override=True：否则 IDE/Shell 里已存在的 HF_TOKEN 会挡住 ai_app1/.env 里的 HF_TOKEN=false
 load_dotenv(Path(__file__).resolve().parent.parent / ".env", override=True)
+
+# 清理空字符串 HF_ENDPOINT，避免 huggingface_hub 模块导入时把它当作合法 endpoint
+if os.getenv("HF_ENDPOINT") == "":
+    del os.environ["HF_ENDPOINT"]
+
+from hf_snapshot_downloader import DEFAULT_CN_MIRROR, HfSnapshotDownloader, PRESETS  # noqa: E402
+
+
+def _resolve_endpoint(no_mirror: bool) -> str | None:
+    if no_mirror:
+        os.environ.pop("HF_ENDPOINT", None)
+        return None
+    return os.getenv("HF_ENDPOINT") or None
+
+
+def _is_transient_network_error(exc: BaseException) -> bool:
+    name = exc.__class__.__name__
+    if name in {
+        "LocalEntryNotFoundError",
+        "RepositoryNotFoundError",
+        "RevisionNotFoundError",
+        "EntryNotFoundError",
+    }:
+        return False
+    if name in {
+        "RemoteProtocolError", "ReadTimeout", "ConnectError", "ConnectTimeout",
+        "PoolTimeout", "ReadError", "WriteError", "IncompleteRead",
+        "ChunkedEncodingError", "ProtocolError", "HfHubHTTPError",
+    }:
+        return True
+    msg = str(exc).lower()
+    if "peer closed connection" in msg or "incomplete" in msg or "timed out" in msg:
+        return True
+    return isinstance(exc, (ConnectionError, TimeoutError, OSError))
+
+
+def _download_with_retries(
+    dl: HfSnapshotDownloader,
+    *,
+    full: bool,
+    dry_run: bool,
+    force: bool,
+    unlock: bool,
+    disk_stats_interval: float,
+    retries: int = 3,
+    retry_wait: float = 3.0,
+) -> None:
+    attempt = 0
+    force_now = force
+    unlock_now = unlock
+    while True:
+        try:
+            dl.download(
+                full=full,
+                dry_run=dry_run,
+                force=force_now,
+                unlock=unlock_now,
+                disk_stats_interval=disk_stats_interval,
+            )
+            return
+        except SystemExit:
+            raise
+        except BaseException as exc:
+            if not _is_transient_network_error(exc):
+                print(
+                    f"\n[error] 不可重试的错误 ({exc.__class__.__name__}): {exc}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                if "LocalEntryNotFoundError" in exc.__class__.__name__:
+                    print(
+                        "[hint] 该错误通常表示无法连接到 Hugging Face Hub 或镜像站，"
+                        "或仓库不存在。请检查网络、代理设置，或尝试 --no-mirror。",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                raise
+            if attempt >= retries:
+                raise
+            attempt += 1
+            wait = retry_wait * (2 ** (attempt - 1))
+            print(
+                f"\n[retry {attempt}/{retries}] 网络中断 ({exc.__class__.__name__}): {exc}\n"
+                f"[retry] {wait:.1f}s 后续传重试……",
+                file=sys.stderr,
+                flush=True,
+            )
+            time.sleep(wait)
+            force_now = False
+            unlock_now = True
 
 
 def main() -> None:
-    default_models_parent = Path(__file__).resolve().parent.parent / "models"
+    default_models_parent = _PROJECT_ROOT / "models"
 
     parser = argparse.ArgumentParser(
         description="Download a sentence-transformers model from Hugging Face Hub",
@@ -52,7 +143,7 @@ def main() -> None:
         "--output-dir",
         type=Path,
         default=None,
-        help="覆盖保存目录（默认: 脚本同级 models/<预设子目录>）",
+        help="覆盖保存目录（默认: 仓库根目录 models/<预设子目录>）",
     )
     parser.add_argument("--full", action="store_true", help="不过滤 onnx/配图（仅 bge-m3 有意义）")
     parser.add_argument("--disk-stats", action="store_true")
@@ -68,24 +159,12 @@ def main() -> None:
     parser.add_argument(
         "--no-mirror",
         action="store_true",
-        help="不走镜像，直连 Hugging Face（仅当未设置环境变量 HF_ENDPOINT 时有效）",
-    )
-    parser.add_argument(
-        "--use-mirror",
-        action="store_true",
-        help=f"显式使用镜像（默认已启用；未设 HF_ENDPOINT 时同 {DEFAULT_CN_MIRROR}）",
+        help="直连 Hugging Face（默认走镜像）",
     )
 
     args = parser.parse_args()
 
-    # 大陆直连 hub 常极慢或假死；未显式 HF_ENDPOINT 时默认走镜像
-    if not os.getenv("HF_ENDPOINT"):
-        if args.no_mirror:
-            pass  # 保持不设 HF_ENDPOINT → 官方 hub
-        else:
-            os.environ["HF_ENDPOINT"] = DEFAULT_CN_MIRROR
-
-    endpoint = os.getenv("HF_ENDPOINT") or None
+    endpoint = _resolve_endpoint(args.no_mirror)
 
     if args.output_dir is not None:
         out = args.output_dir.expanduser().resolve()
@@ -111,7 +190,8 @@ def main() -> None:
     elif stats_interval is None:
         stats_interval = 0.0
 
-    dl.download(
+    _download_with_retries(
+        dl,
         full=args.full,
         dry_run=args.dry_run,
         force=args.force,

@@ -28,8 +28,8 @@ dependencies = [
 ]
 
 [tool.uv.sources]
-rag-framework = { path = "rag_framework" }
-android-domain = { path = "domains/android" }
+rag-framework = { path = "rag_framework", editable = true }
+android-domain = { path = "domains/android", editable = true }
 
 [dependency-groups]
 dev = [

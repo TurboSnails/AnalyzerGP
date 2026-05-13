@@ -57,3 +57,9 @@ rag_framework/build/
 rag_framework/*.egg-info/
 domains/android/build/
 domains/android/*.egg-info/
+pre/chroma_db/
+pre/tantivy_bm25/
+rag_framework/pre/
+rag_framework/pre/chroma_db/
+rag_framework/pre/tantivy_bm25/
+rag_framework/rag_framework/pre/

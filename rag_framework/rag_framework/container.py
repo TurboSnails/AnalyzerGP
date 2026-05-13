@@ -85,15 +85,23 @@ class RAGContainer:
             batch_size=settings.reranker_batch_size,
         )
 
-        # LLM（Semaphore 门控并发）
-        llm = OpenAILLMClient(
-            base_url=settings.llm_base_url,
-            api_key=settings.resolved_llm_api_key,
-            model=settings.llm_model,
-            backend=settings.llm_backend,
-            max_tokens=settings.llm_max_tokens,
-            max_concurrent=settings.llm_max_concurrent,
-        )
+        # LLM（根据 backend 选择本地 transformers 或远程 OpenAI 兼容 API）
+        if settings.llm_backend == "local":
+            from rag_framework.llm.local_client import LocalLLMClient
+            llm = LocalLLMClient(
+                model_path=settings.llm_local_model_path,
+                max_tokens=settings.llm_max_tokens,
+                max_concurrent=settings.llm_max_concurrent,
+            )
+        else:
+            llm = OpenAILLMClient(
+                base_url=settings.llm_base_url,
+                api_key=settings.resolved_llm_api_key,
+                model=settings.llm_model,
+                backend=settings.llm_backend,
+                max_tokens=settings.llm_max_tokens,
+                max_concurrent=settings.llm_max_concurrent,
+            )
 
         # Session
         session_store = MemorySessionStore(

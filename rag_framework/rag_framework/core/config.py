@@ -48,11 +48,20 @@ def _default_repo_root() -> Path:
     """推断仓库根目录。
 
     当 rag_framework 以 editable 或 site-packages 安装时均可正确推断。
-    策略：沿 __file__ 向上查找包含 pyproject.toml 的目录。
+    策略：沿 __file__ 向上查找包含 pyproject.toml 的目录；
+          若该目录同时包含 ai_app1/ 子目录则确认为根目录，
+          否则继续向上查找更大的根目录。
     """
     current = Path(__file__).resolve()
     for parent in current.parents:
         if (parent / "pyproject.toml").is_file():
+            if (parent / "ai_app1").is_dir():
+                return parent
+            # 当前目录有 pyproject.toml 但无 ai_app1（如 rag_framework 子包），
+            # 继续向上查找包含 ai_app1 的更大根目录
+            for grandparent in parent.parents:
+                if (grandparent / "pyproject.toml").is_file() and (grandparent / "ai_app1").is_dir():
+                    return grandparent
             return parent
     # 兜底：传统相对路径（开发模式）
     return current.parent.parent.parent.parent
@@ -83,6 +92,16 @@ def _resolve_rewriter_path() -> str:
         if found := _resolve_weights_dir(candidate):
             return str(found)
     return "Qwen/Qwen2.5-1.5B-Instruct"
+
+
+def _resolve_llm_local_path() -> str:
+    """返回本地 LLM 模型路径（优先查找已下载的 qwen2.5-1.5b-instruct）。"""
+    repo = _default_repo_root()
+    for base in (repo, repo / "ai_app1"):
+        candidate = base / "models" / "qwen2.5-1.5b-instruct"
+        if found := _resolve_weights_dir(candidate):
+            return str(found)
+    return str(repo / "models" / "qwen2.5-1.5b-instruct")
 
 
 def _default_chroma_path() -> str:
@@ -116,22 +135,24 @@ class RAGSettings(BaseSettings):
     )
 
     # ── LLM ──────────────────────────────────────────────────────────────────
-    llm_backend: Literal["minimax", "ollama", "openai"] = "minimax"
+    llm_backend: Literal["minimax", "ollama", "openai", "local"] = "local"
     llm_base_url: str = ""
     llm_model: str = ""
     llm_api_key: str = ""
     llm_max_tokens: int = 512
+    llm_local_model_path: str = Field(default_factory=_resolve_llm_local_path)
 
     @field_validator("llm_base_url", mode="after")
     @classmethod
     def _resolve_llm_base_url(cls, v: str, info) -> str:
         if v:
             return v
-        backend = info.data.get("llm_backend", "minimax")
+        backend = info.data.get("llm_backend", "local")
         presets = {
             "minimax": "https://api.minimaxi.com/v1",
             "ollama": "http://127.0.0.1:11434/v1",
             "openai": "https://api.openai.com/v1",
+            "local": "",
         }
         return presets.get(backend, presets["minimax"])
 
@@ -140,11 +161,12 @@ class RAGSettings(BaseSettings):
     def _resolve_llm_model(cls, v: str, info) -> str:
         if v:
             return v
-        backend = info.data.get("llm_backend", "minimax")
+        backend = info.data.get("llm_backend", "local")
         presets = {
             "minimax": "MiniMax-M2.7",
             "ollama": "qwen2.5:1.5b-instruct-q4_K_M",
             "openai": "gpt-4o-mini",
+            "local": "qwen2.5-1.5b-instruct",
         }
         return presets.get(backend, presets["minimax"])
 
@@ -156,9 +178,9 @@ class RAGSettings(BaseSettings):
         # 兼容旧 OPENAI_API_KEY
         if env_key := os.getenv("OPENAI_API_KEY"):
             return env_key
-        backend = info.data.get("llm_backend", "minimax")
-        if backend == "ollama":
-            return "ollama"
+        backend = info.data.get("llm_backend", "local")
+        if backend in ("ollama", "local"):
+            return backend
         return ""
 
     # ── Embedding ────────────────────────────────────────────────────────────
