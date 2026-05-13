@@ -1,6 +1,6 @@
 # ai_app1 - Android RAG 问答系统设计文档
 
-> 版本: 3.0 | 最后更新: 2026-05-13
+> 版本: 3.1 | 最后更新: 2026-05-13
 
 ---
 
@@ -52,7 +52,7 @@ fenxiCB/
 │       ├── llm/                    # OpenAILLMClient / tool_registry
 │       ├── rerank/                 # CrossEncoderReranker / FallbackReranker
 │       ├── retrieval/              # DenseStore / HybridRetriever / sparse
-│       │   └── query_rewriter/     # RuleQueryRewriter / LLMQueryRewriter
+│       │   └── query_rewriter/     # RuleQueryRewriter / LLMQueryRewriter / QwenQueryRewriter
 │       ├── session/                # SessionManager / memory_store
 │       └── eval/                   # 评测框架
 ├── domains/android/
@@ -133,6 +133,9 @@ async def chat(req: ChatRequest, container: RAGContainer = Depends(get_container
 | `bm25_path` | 依 chroma 父目录 | `<chroma_parent>/tantivy_bm25/` |
 | `bge_m3_path` | 动态解析 | 查 `models/bge-m3/` 含权重目录 |
 | `reranker_model` | 动态解析 | 本地 `models/bge-reranker-base/` 或 HF Hub |
+| `rewriter_backend` | `"auto"` | `auto`=本地优先（路径存在则用 Qwen，否则 MiniMax）；`local`=强制本地；`ollama`=Ollama |
+| `rewriter_model` | 动态解析 | 本地 `models/qwen2.5-1.5b-instruct/`（`_resolve_rewriter_path()` 自动查找） |
+| `rewriter_max_tokens` | `128` | 改写器最大输出 token 数 |
 
 配置加载顺序：`.env` → `ai_app1/.env`（`override=False`，不覆盖已有环境变量）。
 
@@ -350,18 +353,33 @@ raw_text : TEXT, stored, tokenizer=raw        # 原始文本，命中后返回
 |-------|---------|--------|------|
 | **L0** 直通 | 短 query，无代词/模糊词 | — (passthrough) | ~0ms |
 | **L1** 规则扩展 | 命中中文→英文术语词典 | `RuleQueryRewriter` | ~1ms |
-| **L2** LLM 重写 | 含代词/模糊词/长 query/短追问 | `LLMQueryRewriter` | ~1500ms |
+| **L2** LLM 重写 | 含代词/模糊词/长 query（≥25字）/短追问 | `QwenQueryRewriter`（本地）| ~800ms（MPS） |
 
 **RuleQueryRewriter**（`retrieval/query_rewriter/rule_rewriter.py`）：
 - 输出：`[original (w=1.0)] + [keyword (w=0.85, routes=[bm25,dense])]`
 - 仅在命中至少一个术语时输出扩写
 
-**LLMQueryRewriter**（`retrieval/query_rewriter/llm_rewriter.py`）：
+**QwenQueryRewriter**（`retrieval/query_rewriter/qwen_rewriter.py`）— 默认 L2：
+- 本地 Qwen2.5-1.5B-Instruct（`models/qwen2.5-1.5b-instruct/`），MPS/CUDA/CPU 自适应
+- **懒加载**：首次调用时加载模型（~12s），后续复用；线程安全双重检查锁
 - 携带最近 4 条对话历史（每条截取 80 字）
-- 生成 2~3 条独立检索 query（解决指代/上下文依赖）
-- 在独立线程+事件循环中运行，避免嵌套 event loop
-- 15 秒超时，失败降级为原始 query
+- 生成 2~3 条独立检索 query；输出 JSON 数组，失败降级按行解析
+- 输出：`[original(1.0)] + [semantic(0.90, 0.80)]`
+- 日志：`INFO` 级打印 model 路径、query、耗时、扩写结果
+
+**LLMQueryRewriter**（`retrieval/query_rewriter/llm_rewriter.py`）— 远程 fallback：
+- 仅当 `rewriter_backend=auto` 且本地模型路径不存在时启用（调用 MiniMax 远程 API）
+- 独立线程+事件循环，15 秒超时，失败降级为原始 query
 - 输出：`[original(1.0)] + [semantic(0.90, 0.80, 0.70)]`
+
+**rewriter_backend 选择逻辑**（`container.py`）：
+
+```python
+if backend == "local" or (backend == "auto" and Path(model_path).is_dir()):
+    llm_rewriter = QwenQueryRewriter(model_path, max_new_tokens)
+else:
+    llm_rewriter = LLMQueryRewriter(llm=minimax_llm)  # 远程 fallback
+```
 
 **QueryRoute 元数据：**
 
@@ -573,7 +591,7 @@ flowchart TD
     G --> H{扩写级别}
     H -->|L0| I1[原始 query × 1]
     H -->|L1| I2[RuleQueryRewriter<br/>词典扩展 2条]
-    H -->|L2| I3[LLMQueryRewriter<br/>LLM 生成 3~4条]
+    H -->|L2| I3[QwenQueryRewriter<br/>本地 Qwen 生成 2~3条]
     I1 & I2 & I3 --> J[asyncio.to_thread → HybridRetriever]
     J --> K{ThreadPoolExecutor 3路并发}
     K --> K1[Dense: child→parent 回溯]
@@ -676,7 +694,8 @@ curl -X POST http://localhost:8000/chat \
 | 检索架构 | 三路并发混合检索 | Dense 精度 + HyDE 覆盖 + BM25 关键词，三路互补；ThreadPoolExecutor 并发 ~90ms |
 | 父子回溯 | child 检索 → parent 上下文 | 细粒度匹配提升精度，大粒度 parent 保证上下文连贯性 |
 | BM25 引擎 | Tantivy (Rust) + jieba | mmap 磁盘索引内存占用小；Rust BM25 ~10× Python；jieba 分词精度高 |
-| 查询扩写 | 三级路由 L0/L1/L2 | 80% 简单 query 不需 LLM；规则路由 1ms 分流，平均耗时 1500ms → ~300ms |
+| 查询扩写 | 三级路由 L0/L1/L2 | 80% 简单 query 不需 LLM；规则路由 1ms 分流，平均耗时大幅降低 |
+| L2 改写器 | 本地 Qwen2.5-1.5B-Instruct | 避免 L2 改写消耗远程 API 配额；~800ms（MPS）vs ~1500ms（远端）；rewriter_backend=auto 自动选择，本地模型不存在时降级 MiniMax |
 | Reranker | CrossEncoder (bge-reranker-base) | 语义相关性打分优于规则线性；sigmoid 归一化后与 RRF 同区间；FallbackReranker 作降级 |
 | 低置信度兜底 | ce_score 阈值 0.30 | 复用 reranker 输出无额外开销；明确拒答比基于不相关片段硬答更有价值 |
 | 索引编排 | VectorIndexer 统一管道 | 消除 init 脚本与框架的重复逻辑（chunking/HyDE/batch 写入），300 行 → 130 行 |
@@ -701,8 +720,8 @@ curl -X POST http://localhost:8000/chat \
 
 ### 8.3 冷启动延迟（C）
 
-**风险**：BGE-M3 ~3-5s、CrossEncoder ~2-3s、Ollama qwen2.5 ~10-15s。  
-**缓解**：`preload_models()` 启动时预热所有组件，首用户请求到达时已就绪。
+**风险**：BGE-M3 ~3-5s、CrossEncoder ~2-3s、QwenQueryRewriter（本地）首次调用 ~12s。  
+**缓解**：BGE-M3 / CrossEncoder 在 `preload_models()` 启动时预热；QwenQueryRewriter **懒加载**（首条触发 L2 改写的请求承担加载耗时，后续复用）。
 
 ### 8.4 rag_framework 版本漂移（D）
 
@@ -740,6 +759,7 @@ curl -X POST http://localhost:8000/chat \
 
 | 版本 | 日期 | 变更内容 |
 |------|------|----------|
+| v3.1 | 2026-05-13 | **本地 Qwen 改写器**：新增 `QwenQueryRewriter`（Qwen2.5-1.5B-Instruct，懒加载，线程安全）；`container.py` 按 `rewriter_backend` 自动选择本地/远程改写器；`SessionManager._build_routes()` 加 Rewrite level 日志；`LLMQueryRewriter` / `RuleQueryRewriter` 加 model + 耗时 INFO 日志 |
 | v3.0 | 2026-05-13 | **三层架构重构**：rag_framework 独立包 + AndroidDomainPlugin + 薄应用层；删除 ai_app1 代理层；VectorIndexer 统一索引管道；RuleQueryRewriter / LLMQueryRewriter 提取为框架组件；FallbackReranker 独立组件；DenseStore 新增 get_or_create_collection；pytest 测试套件 |
 | v2.7 | 2026-05-12 | Rewrite Router 三级分流（L0/L1/L2）；低置信度兜底（top_ce<0.30）；Ollama 集成；LLM max_tokens 兼容修复；RERANK_TOP_K 5→3；`/debug/rewrite_cache` 监控 |
 | v2.6 | 2026-05-12 | Query Rewrite + Retrieval Orchestration：RewriteQuery(text,type,weight,routes) + Weighted RRF |
