@@ -30,7 +30,7 @@ from ai_app3.service.evaluator import evaluate_retrieval, decide_next_step
 from ai_app3.service.context_compressor import compress_context, extract_key_facts, build_prompt_context
 from ai_app3.service.knowledge_graph import expand_by_entities, fetch_docs_by_ids
 from ai_app3.service.tools import TOOLS, TOOL_MAP
-from ai_app1.service.vector_store import query_db
+from ai_app3.service.retriever import query_context as query_db
 
 
 def _estimate_tokens(messages: list[dict | Any]) -> int:

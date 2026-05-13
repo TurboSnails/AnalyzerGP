@@ -12,9 +12,9 @@ for path in (_env_path, _ai_app1_env):
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-CHROMA_DB_PATH = os.path.normpath(
-    os.path.join(_current_dir, "..", "..", "ai_app1", "pre", "chroma_db")
-)
+# 复用 rag_framework 的路径解析逻辑（自动识别 ai_app1/data/chroma_db）
+from rag_framework.core.config import get_settings as _rag_get_settings
+CHROMA_DB_PATH = _rag_get_settings().chroma_db_path
 
 # ── 会话与预算 ──
 DEFAULT_TOKEN_BUDGET = 4096

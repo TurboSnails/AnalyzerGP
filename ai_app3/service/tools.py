@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from langchain_core.tools import tool
 
-from ai_app1.service.vector_store import query_db
+from ai_app3.service.retriever import query_context as query_db
 from ai_app3.service.knowledge_graph import expand_by_entities, fetch_docs_by_ids
 from ai_app3.core.logger import graph_logger
 

@@ -187,7 +187,7 @@
     border-bottom-left-radius: 3px;
   }
   .bubble.ai.streaming::after {
-    content: '▋';
+    content: '\u258B';
     color: var(--accent);
     animation: blink .8s step-end infinite;
     margin-left: 1px;
@@ -321,7 +321,7 @@
 
 <div class="config-bar">
   <label>API</label>
-  <input type="text" id="apiUrl" value="http://localhost:8001" spellcheck="false" autocomplete="off" />
+  <input type="text" id="apiUrl" value="" placeholder="空则用当前页 origin（勿混 localhost / 127.0.0.1）" spellcheck="false" autocomplete="off" />
   <div class="status-dot" id="statusDot"></div>
   <span class="status-text" id="statusText">未连接</span>
 </div>
@@ -351,6 +351,13 @@
   const apiUrlEl  = document.getElementById('apiUrl');
   const statusDot = document.getElementById('statusDot');
   const statusTxt = document.getElementById('statusText');
+
+  // 与页面同源：避免 http://127.0.0.1:8001 打开却请求 http://localhost:8001 → 触发 CORS/OPTIONS
+  if (apiUrlEl && !apiUrlEl.value.trim()) {
+    const proto = window.location.protocol;
+    apiUrlEl.value =
+      proto === 'http:' || proto === 'https:' ? window.location.origin : 'http://127.0.0.1:8001';
+  }
 
   let isSending = false;
 
@@ -476,13 +483,57 @@
     const metricsBar = aiRow.querySelector('#metricsBar');
     const ttftLive = aiRow.querySelector('#ttftLive');
 
-    const apiUrl = apiUrlEl.value.trim().replace(/\/$/, '');
+    let apiUrl = apiUrlEl.value.trim().replace(/\/$/, '');
+    if (!apiUrl) {
+      const proto = window.location.protocol;
+      apiUrl =
+        proto === 'http:' || proto === 'https:'
+          ? window.location.origin.replace(/\/$/, '')
+          : 'http://127.0.0.1:8001';
+    }
     setStatus('loading', '请求中…');
 
     const sendTime = performance.now();
     let firstTokenTime = null;
     let charCount = 0;
     let text = '';
+    let renderQueue = [];
+    let isRendering = false;
+
+    function enqueueChars(str) {
+      for (const ch of str) {
+        renderQueue.push(ch);
+      }
+      if (!isRendering) {
+        isRendering = true;
+        requestAnimationFrame(renderLoop);
+      }
+    }
+
+    function renderLoop() {
+      const batchSize = renderQueue.length > 100 ? 8 : (renderQueue.length > 30 ? 4 : 2);
+      let i = 0;
+      while (renderQueue.length > 0 && i < batchSize) {
+        text += renderQueue.shift();
+        i++;
+      }
+      bubble.textContent = text;
+      scrollBottom();
+      if (renderQueue.length > 0) {
+        requestAnimationFrame(renderLoop);
+      } else {
+        isRendering = false;
+      }
+    }
+
+    function flushRender() {
+      while (renderQueue.length > 0) {
+        text += renderQueue.shift();
+      }
+      bubble.textContent = text;
+      scrollBottom();
+      isRendering = false;
+    }
 
     try {
       const resp = await fetch(`${apiUrl}/chat`, {
@@ -525,12 +576,11 @@
           setStatus('online', `首字 ${fmt(ttft)}`);
         }
 
-        text += chunk;
         charCount += chunk.length;
-        bubble.textContent = text;
-        scrollBottom();
+        enqueueChars(chunk);
       }
 
+      flushRender();
       clearInterval(timerInterval);
 
       const totalMs = performance.now() - sendTime;
@@ -541,6 +591,7 @@
       setStatus('online', `完成 · 耗时 ${fmt(totalMs)}`);
 
     } catch (err) {
+      flushRender();
       bubble.remove();
       metricsBar.remove();
       appendError(err.message || String(err));

@@ -16,7 +16,8 @@ from typing import Any
 
 import chromadb
 
-from ai_app3.core.config import CHROMA_DB_PATH, ENABLE_KNOWLEDGE_GRAPH
+from rag_framework.core.config import get_settings as _rag_get_settings
+from ai_app3.core.config import ENABLE_KNOWLEDGE_GRAPH
 from ai_app3.core.logger import kg_logger
 
 # ── 全局缓存 ──
@@ -24,7 +25,7 @@ _kg_cache: dict[str, Any] | None = None
 
 
 def _get_client() -> chromadb.PersistentClient:
-    return chromadb.PersistentClient(path=CHROMA_DB_PATH)
+    return chromadb.PersistentClient(path=_rag_get_settings().chroma_db_path)
 
 
 def _extract_entities(text: str) -> list[str]:

@@ -16,7 +16,7 @@ from fastapi import APIRouter
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from ai_app2.core.config import DEFAULT_TOKEN_BUDGET
+from ai_app2.core.container import get_app_container
 from ai_app2.core.logger import chat_logger
 from ai_app2.graph.builder import graph
 
@@ -26,6 +26,7 @@ router = APIRouter()
 class ChatRequest(BaseModel):
     """POST /chat 请求体"""
     message: str
+    user_id: str = "default_user"
 
 
 def _make_thread_id(user_id: str) -> str:
@@ -46,11 +47,14 @@ async def chat(req: ChatRequest):
         5. Graph 内部已自动完成：retrieve → build_messages → llm → save_reply → summarize? → trim
     """
     req_id = id(req)
-    user_id = "default_user"
-    thread_id = _make_thread_id(user_id)
+    thread_id = _make_thread_id(req.user_id)
     config = {"configurable": {"thread_id": thread_id}}
+    container = get_app_container()
+    settings = container.settings
 
-    chat_logger.info(f"[{req_id}] 收到请求: message={req.message[:50]!r}, thread={thread_id}")
+    chat_logger.info(
+        f"[{req_id}] 收到请求: message={req.message[:50]!r}, thread={thread_id}"
+    )
     start = time.monotonic()
 
     # ── 1. 从 checkpoint 加载当前状态 ────────────────────────────────────────
@@ -59,10 +63,10 @@ async def chat(req: ChatRequest):
         vals = current_state.values
         history = list(vals.get("history", []))
         summary = vals.get("summary", "")
-        token_budget = vals.get("token_budget", DEFAULT_TOKEN_BUDGET)
+        token_budget = vals.get("token_budget", settings.default_token_budget)
         trimmed = list(vals.get("trimmed", []))
     else:
-        history, summary, token_budget, trimmed = [], "", DEFAULT_TOKEN_BUDGET, []
+        history, summary, token_budget, trimmed = [], "", settings.default_token_budget, []
 
     # 追加本轮用户消息
     history.append({"role": "user", "content": req.message})
@@ -79,8 +83,8 @@ async def chat(req: ChatRequest):
     }
 
     chat_logger.debug(
-        f"[{req_id}] 初始 state: history={len(history)}, summary={'有' if summary else '无'}, "
-        f"budget={token_budget}"
+        f"[{req_id}] 初始 state: history={len(history)}, "
+        f"summary={'有' if summary else '无'}, budget={token_budget}"
     )
 
     # ── 2. 流式生成器 ───────────────────────────────────────────────────────
@@ -106,7 +110,8 @@ async def chat(req: ChatRequest):
             final_history = result.get("history", [])
             final_summary = result.get("summary", "")
             chat_logger.info(
-                f"[{req_id}] 请求完成: reply_len={len(reply)}, history={len(final_history)}, "
+                f"[{req_id}] 请求完成: reply_len={len(reply)}, "
+                f"history={len(final_history)}, "
                 f"summary={'有' if final_summary else '无'}, 耗时={elapsed:.2f}s"
             )
 
