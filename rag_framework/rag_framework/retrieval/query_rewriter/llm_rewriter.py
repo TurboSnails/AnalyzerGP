@@ -9,6 +9,7 @@ LLM-Based Query Rewriter
 from __future__ import annotations
 
 import asyncio
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 from rag_framework.core.logger import get_logger
@@ -37,15 +38,24 @@ class LLMQueryRewriter(QueryRewriter):
         )
 
     def rewrite(self, query: str, history: list[dict]) -> list[QueryRoute]:
+        model = self._llm.model
+        _logger.info(f"LLM 改写开始: model={model!r}, query={query!r}")
+        t0 = time.monotonic()
+
         messages = self._build_messages(query, history)
         try:
             raw = self._run_sync(self._llm.chat(messages))
         except Exception as exc:
-            _logger.warning(f"LLM 改写失败，降级返回原始 query: {exc}")
+            elapsed = time.monotonic() - t0
+            _logger.warning(
+                f"LLM 改写失败 ({elapsed*1000:.0f}ms), model={model!r}: {exc}，降级返回原始 query"
+            )
             return [QueryRoute(text=query, type="original", weight=1.0)]
 
+        elapsed = time.monotonic() - t0
         lines = [ln.strip() for ln in raw.strip().splitlines() if ln.strip()]
         if not lines:
+            _logger.warning(f"LLM 改写返回空结果 ({elapsed*1000:.0f}ms), model={model!r}，降级返回原始 query")
             return [QueryRoute(text=query, type="original", weight=1.0)]
 
         routes: list[QueryRoute] = [
@@ -60,7 +70,10 @@ class LLMQueryRewriter(QueryRewriter):
                     routes=["dense", "bm25"],
                 )
             )
-        _logger.debug(f"LLM 改写: {query!r} → {len(routes)} 条")
+        _logger.info(
+            f"LLM 改写完成 ({elapsed*1000:.0f}ms): model={model!r}, "
+            f"{query!r} → {len(routes)-1} 条扩写: {[r.text for r in routes[1:]]}"
+        )
         return routes
 
     def _build_messages(self, query: str, history: list[dict]) -> list[dict]:

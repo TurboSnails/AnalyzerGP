@@ -24,6 +24,7 @@ from rag_framework.retrieval.fusion import HybridRetriever
 from rag_framework.retrieval.query_rewriter import (
     RuleQueryRewriter,
     LLMQueryRewriter,
+    QwenQueryRewriter,
 )
 from rag_framework.session.base import SessionStore
 from rag_framework.session.memory_store import MemorySessionStore
@@ -113,7 +114,20 @@ class RAGContainer:
 
         # Rewriters
         rule_rewriter = RuleQueryRewriter(domain=domain)
-        llm_rewriter = LLMQueryRewriter(llm=llm)
+        from pathlib import Path
+        from rag_framework.core.logger import get_logger as _get_logger
+        _clog = _get_logger("rag.container")
+        backend = settings.rewriter_backend
+        model_path = settings.rewriter_model
+        if backend == "local" or (backend == "auto" and Path(model_path).is_dir()):
+            _clog.info(f"LLM 改写器: backend=local, path={model_path!r}")
+            llm_rewriter = QwenQueryRewriter(
+                model_path=model_path,
+                max_new_tokens=settings.rewriter_max_tokens,
+            )
+        else:
+            _clog.info(f"LLM 改写器: backend=remote(minimax), model={llm.model!r}")
+            llm_rewriter = LLMQueryRewriter(llm=llm, max_tokens=settings.rewriter_max_tokens)
 
         return cls(
             settings=settings,

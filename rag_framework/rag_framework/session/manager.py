@@ -114,6 +114,7 @@ class SessionManager:
             list[QueryRoute]，第一条为原始/改写后的主 query。
         """
         level = self._domain.rewrite_router_rules(query, history)
+        session_logger.info(f"Rewrite level={level}: query={query!r}")
 
         if level == 2 and self._llm_rewriter is not None:
             return self._llm_rewriter.rewrite(query, history)
@@ -121,8 +122,9 @@ class SessionManager:
         if level == 1 and self._rule_rewriter is not None:
             return self._rule_rewriter.rewrite(query, history)
 
-        # Level 0：只做查询分类，不扩写
+        # Level 0 / None：只做查询分类，不扩写
         route = self._domain.classify_query(query, history)
+        session_logger.info(f"Rewrite level={level}: 跳过改写, route_type={route.type!r}")
         return [route]
 
     def build_messages(self, session: SessionData, req_msg: str) -> list[dict]:
@@ -141,10 +143,7 @@ class SessionManager:
 
         # 1. 分级 rewrite + classify → 多路 QueryRoute
         routes = self._build_routes(req_msg, session.history)
-        session_logger.info(
-            f"检索路由: level={self._domain.rewrite_router_rules(req_msg, session.history)}, "
-            f"routes={[r.type for r in routes]}"
-        )
+        session_logger.info(f"检索路由: routes={[r.type for r in routes]}")
 
         # 2. 多路检索
         result = self._retriever.retrieve(routes)

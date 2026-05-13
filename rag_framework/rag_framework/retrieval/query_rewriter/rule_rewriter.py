@@ -10,6 +10,8 @@ Rule-Based Query Rewriter
 """
 from __future__ import annotations
 
+import time
+
 from rag_framework.core.logger import get_logger
 from rag_framework.domain.base import DomainPlugin, QueryRoute
 from rag_framework.retrieval.query_rewriter.base import QueryRewriter
@@ -24,14 +26,17 @@ class RuleQueryRewriter(QueryRewriter):
         self._terms: dict[str, str] = domain.get_term_mapping()
 
     def rewrite(self, query: str, history: list[dict]) -> list[QueryRoute]:
+        t0 = time.monotonic()
         original = QueryRoute(text=query, type="original", weight=1.0)
 
         matched_en = [en for zh, en in self._terms.items() if zh in query]
         if not matched_en:
+            _logger.debug(f"规则改写 ({(time.monotonic()-t0)*1000:.0f}ms): 无命中术语，返回原始 query={query!r}")
             return [original]
 
         expanded = query + " " + " ".join(matched_en)
-        _logger.debug(f"规则扩展: {query!r} + {matched_en}")
+        elapsed = time.monotonic() - t0
+        _logger.info(f"规则改写 ({elapsed*1000:.0f}ms): {query!r} + {matched_en} → {expanded!r}")
 
         return [
             original,
