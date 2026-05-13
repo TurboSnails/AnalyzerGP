@@ -11,12 +11,13 @@ from typing import TYPE_CHECKING
 
 from rag_framework.core.config import RAGSettings
 from rag_framework.core.logger import session_logger
-from rag_framework.domain.base import DomainPlugin
+from rag_framework.domain.base import DomainPlugin, QueryRoute
 from rag_framework.session.base import SessionStore, SessionData
 
 if TYPE_CHECKING:
     from rag_framework.llm.base import LLMClient
     from rag_framework.retrieval.base import Retriever
+    from rag_framework.retrieval.query_rewriter.base import QueryRewriter
 
 
 class SessionManager:
@@ -38,12 +39,16 @@ class SessionManager:
         retriever: Retriever,
         domain: DomainPlugin,
         settings: RAGSettings | None = None,
+        rule_rewriter: QueryRewriter | None = None,
+        llm_rewriter: QueryRewriter | None = None,
     ) -> None:
         self._store = store
         self._llm = llm
         self._retriever = retriever
         self._domain = domain
         self._settings = settings or RAGSettings()
+        self._rule_rewriter = rule_rewriter
+        self._llm_rewriter = llm_rewriter
 
     def get_session(self, user_id: str) -> SessionData:
         """获取或创建会话。"""
@@ -101,6 +106,25 @@ class SessionManager:
             f"裁剪历史: 裁掉 {trimmed_count} 条, 剩余 {len(session.history)} 条"
         )
 
+    def _build_routes(self, query: str, history: list[dict]) -> list[QueryRoute]:
+        """
+        根据 DomainPlugin 的分级规则生成多路检索路由。
+
+        Returns:
+            list[QueryRoute]，第一条为原始/改写后的主 query。
+        """
+        level = self._domain.rewrite_router_rules(query, history)
+
+        if level == 2 and self._llm_rewriter is not None:
+            return self._llm_rewriter.rewrite(query, history)
+
+        if level == 1 and self._rule_rewriter is not None:
+            return self._rule_rewriter.rewrite(query, history)
+
+        # Level 0：只做查询分类，不扩写
+        route = self._domain.classify_query(query, history)
+        return [route]
+
     def build_messages(self, session: SessionData, req_msg: str) -> list[dict]:
         """
         构建完整 messages（含检索上下文）。
@@ -115,8 +139,15 @@ class SessionManager:
                 "content": "【注意】对话即将超出上下文限制，请先简洁总结之前的关键信息，再继续回答。"
             })
 
-        # 检索
-        result = self._retriever.retrieve(req_msg)
+        # 1. 分级 rewrite + classify → 多路 QueryRoute
+        routes = self._build_routes(req_msg, session.history)
+        session_logger.info(
+            f"检索路由: level={self._domain.rewrite_router_rules(req_msg, session.history)}, "
+            f"routes={[r.type for r in routes]}"
+        )
+
+        # 2. 多路检索
+        result = self._retriever.retrieve(routes)
         context = "\n\n".join(d.text for d in result.docs) if result.docs else ""
         top_ce = result.metadata.get("top_ce", 0.0)
         n_chunks = len(result.docs)

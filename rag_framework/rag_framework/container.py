@@ -21,6 +21,10 @@ from rag_framework.rerank.cross_encoder import CrossEncoderReranker
 from rag_framework.retrieval.dense import DenseStore
 from rag_framework.retrieval.sparse import BM25Store
 from rag_framework.retrieval.fusion import HybridRetriever
+from rag_framework.retrieval.query_rewriter import (
+    RuleQueryRewriter,
+    LLMQueryRewriter,
+)
 from rag_framework.session.base import SessionStore
 from rag_framework.session.memory_store import MemorySessionStore
 
@@ -41,6 +45,8 @@ class RAGContainer:
     llm: LLMClient
     session_store: SessionStore
     domain: DomainPlugin
+    rule_rewriter: RuleQueryRewriter | None = None
+    llm_rewriter: LLMQueryRewriter | None = None
 
     @classmethod
     def from_settings(cls, settings: RAGSettings | None = None) -> "RAGContainer":
@@ -105,6 +111,10 @@ class RAGContainer:
             domain=domain,
         )
 
+        # Rewriters
+        rule_rewriter = RuleQueryRewriter(domain=domain)
+        llm_rewriter = LLMQueryRewriter(llm=llm)
+
         return cls(
             settings=settings,
             embedder=embedder,
@@ -115,6 +125,8 @@ class RAGContainer:
             llm=llm,
             session_store=session_store,
             domain=domain,
+            rule_rewriter=rule_rewriter,
+            llm_rewriter=llm_rewriter,
         )
 
     # ─── 快捷方法 ───────────────────────────────────────────────────────────────
@@ -136,6 +148,29 @@ class RAGContainer:
             retriever=self.retriever,
             domain=self.domain,
             settings=self.settings,
+            rule_rewriter=self.rule_rewriter,
+            llm_rewriter=self.llm_rewriter,
         )
         async for chunk in manager.chat_stream(query, user_id):
             yield chunk
+
+    def build_routes(self, query: str, history: list[dict]) -> list:
+        """
+        根据 DomainPlugin 的分级规则生成多路检索路由。
+
+        Returns:
+            list[QueryRoute]，第一条为原始/改写后的主 query。
+        """
+        from rag_framework.domain.base import QueryRoute
+
+        level = self.domain.rewrite_router_rules(query, history)
+
+        if level == 2 and self.llm_rewriter is not None:
+            return self.llm_rewriter.rewrite(query, history)
+
+        if level == 1 and self.rule_rewriter is not None:
+            return self.rule_rewriter.rewrite(query, history)
+
+        # Level 0：只做查询分类，不扩写
+        route = self.domain.classify_query(query, history)
+        return [route]

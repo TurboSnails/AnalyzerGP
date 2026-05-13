@@ -22,18 +22,19 @@ def _get_container() -> RAGContainer:
     return _container
 
 
-def query_context(query: str, top_k: int = 5) -> str | None:
+def query_context(query: str, top_k: int = 5, history: list[dict] | None = None) -> str | None:
     """
     执行混合检索，返回格式化的上下文文本。
 
     接口与原 ai_app1.service.vector_store.query_db() 兼容，内部通过
-    rag_framework.HybridRetriever 执行 Dense+HyDE+BM25+RRF+Rerank+Lost-in-Middle。
+    rag_framework.HybridRetriever 执行 Rewrite→Classify→Dense+HyDE+BM25+RRF+Rerank+Lost-in-Middle。
     """
     if not query or not query.strip():
         return None
     try:
         container = _get_container()
-        result = container.retriever.retrieve(query, top_k=top_k)
+        routes = container.build_routes(query, history or [])
+        result = container.retriever.retrieve(routes, top_k=top_k)
         if not result.docs:
             retrieve_logger.info(f"检索无结果: query={query[:30]!r}")
             return None

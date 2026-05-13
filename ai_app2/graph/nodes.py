@@ -21,14 +21,16 @@ from ai_app2.service.retriever import query_db
 def retrieve_node(state: dict) -> dict:
     """
     基于 user_message 执行多路混合检索。
-    复用 rag_framework 的 HybridRetriever：Dense → HyDE → BM25 → RRF → Rerank → Lost-in-Middle
+    复用 rag_framework 的 HybridRetriever：
+    Rewrite → Classify → Dense → HyDE → BM25 → RRF → Rerank → Lost-in-Middle
     """
     query = state.get("user_message", "")
+    history = state.get("history", [])
     if not query:
         retrieve_logger.warning("retrieve_node: user_message 为空，跳过检索")
         return {"retrieved_context": None}
 
-    context = query_db(query)
+    context = query_db(query, history)
     if context:
         retrieve_logger.info(f"检索完成: query={query[:30]!r}, len={len(context)}")
     else:
