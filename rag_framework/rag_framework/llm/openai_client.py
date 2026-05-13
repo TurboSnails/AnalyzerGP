@@ -5,8 +5,8 @@ OpenAI 兼容 LLM Client 实现
 """
 from __future__ import annotations
 
+import asyncio
 import json
-import logging
 import time
 from typing import AsyncIterator
 
@@ -31,19 +31,23 @@ class OpenAILLMClient(LLMClient):
         backend: str = "openai",
         max_tokens: int = 512,
         timeout: float = 120.0,
+        max_concurrent: int = 3,
     ) -> None:
         self._base_url = base_url
         self._model = model
         self._backend = backend
         self._max_tokens = max_tokens
         self._timeout = timeout
+        self._max_concurrent = max_concurrent
+        self._semaphore: asyncio.Semaphore | None = None
         self.client = openai.AsyncOpenAI(
             base_url=base_url,
             api_key=api_key,
             timeout=timeout,
         )
         ai_client_logger.info(
-            f"OpenAILLMClient 初始化: backend={backend}, base_url={base_url}, model={model}"
+            f"OpenAILLMClient 初始化: backend={backend}, base_url={base_url}, "
+            f"model={model}, max_concurrent={max_concurrent}"
         )
 
     @property
@@ -54,12 +58,19 @@ class OpenAILLMClient(LLMClient):
     def model(self) -> str:
         return self._model
 
+    def _get_semaphore(self) -> asyncio.Semaphore:
+        """懒初始化 Semaphore（必须在 async 上下文中首次调用）。"""
+        if self._semaphore is None:
+            self._semaphore = asyncio.Semaphore(self._max_concurrent)
+        return self._semaphore
+
     # ─── 非流式 ─────────────────────────────────────────────────────────────────
 
     async def chat(self, messages: list[dict], use_tools: bool = False) -> str:
         kwargs = self._build_kwargs(messages, use_tools, stream=False)
         start = time.monotonic()
-        response = await self.client.chat.completions.create(**kwargs)
+        async with self._get_semaphore():
+            response = await self.client.chat.completions.create(**kwargs)
         content = response.choices[0].message.content or ""
         ai_client_logger.info(
             f"[{self._backend}] chat 完成: content_len={len(content)}, "
@@ -80,7 +91,7 @@ class OpenAILLMClient(LLMClient):
     async def run_agent(self, messages: list[dict]) -> str:
         """非流式工具增强对话。"""
         MAX_STEPS = 10
-        for step in range(MAX_STEPS):
+        for _ in range(MAX_STEPS):
             kwargs = self._build_kwargs(messages, use_tools=True, stream=False)
             response = await self.client.chat.completions.create(**kwargs)
             msg = response.choices[0].message
@@ -103,7 +114,9 @@ class OpenAILLMClient(LLMClient):
     ) -> AsyncIterator[str]:
         kwargs = self._build_kwargs(messages, use_tools, stream=True)
         t0 = time.perf_counter()
-        response = await self.client.chat.completions.create(**kwargs)
+        # Semaphore 只门控连接建立，不持锁贯穿整个流式读取，避免长占槽位
+        async with self._get_semaphore():
+            response = await self.client.chat.completions.create(**kwargs)
 
         first_token_ms = None
         char_count = 0

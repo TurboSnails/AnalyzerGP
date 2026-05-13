@@ -18,6 +18,7 @@ Agentic RAG 节点定义 — 从 ai_app2 的线性 pipeline 升级为迭代式 S
 """
 from __future__ import annotations
 
+import asyncio
 import re
 from typing import Any
 
@@ -79,21 +80,28 @@ def decompose_node(state: dict) -> dict:
 # ═════════════════════════════════════════════════════════════════════════════
 # Node: retrieve_node  —— 并行多路子查询检索 + KG 扩展
 # ═════════════════════════════════════════════════════════════════════════════
-def retrieve_node(state: dict) -> dict:
+async def retrieve_node(state: dict) -> dict:
     subs = state.get("sub_queries", [])
     if not subs:
-        # 单查询回退
         subs = [{"sub_query": state.get("user_message", ""), "confidence": 1.0}]
 
+    valid_queries = [s.get("sub_query", "") for s in subs if s.get("sub_query")]
+
+    # 子查询并发检索（asyncio.gather）
+    raw_results = await asyncio.gather(
+        *[query_db(q) for q in valid_queries],
+        return_exceptions=True,
+    )
+
     contexts: list[str | None] = []
-    for s in subs:
-        q = s.get("sub_query", "")
-        if not q:
-            continue
-        ctx = query_db(q)
-        if ctx:
-            retrieve_logger.info(f"子查询检索: {q[:30]!r}, len={len(ctx)}")
-        contexts.append(ctx)
+    for q, ctx in zip(valid_queries, raw_results):
+        if isinstance(ctx, Exception):
+            retrieve_logger.warning(f"子查询检索异常: {q[:30]!r}: {ctx}")
+            contexts.append(None)
+        else:
+            if ctx:
+                retrieve_logger.info(f"子查询检索: {q[:30]!r}, len={len(ctx)}")
+            contexts.append(ctx)
 
     merged = merge_contexts(contexts)
 

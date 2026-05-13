@@ -22,13 +22,13 @@ def multiply(a: int, b: int) -> int:
 
 
 @tool
-def search_docs(query: str, top_k: int = 5) -> str:
+async def search_docs(query: str, top_k: int = 5) -> str:
     """
     在 Android 开发文档知识库中检索与查询相关的技术资料。
     返回检索到的文档片段，可直接作为回答依据。
     """
     graph_logger.info(f"[tool] search_docs: query={query!r}, top_k={top_k}")
-    context = query_db(query)
+    context = await query_db(query)
     if not context:
         # 尝试知识图谱补充
         kg_ids = expand_by_entities(query, top_k=top_k)

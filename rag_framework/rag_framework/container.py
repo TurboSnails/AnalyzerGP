@@ -85,13 +85,14 @@ class RAGContainer:
             batch_size=settings.reranker_batch_size,
         )
 
-        # LLM
+        # LLM（Semaphore 门控并发）
         llm = OpenAILLMClient(
             base_url=settings.llm_base_url,
             api_key=settings.resolved_llm_api_key,
             model=settings.llm_model,
             backend=settings.llm_backend,
             max_tokens=settings.llm_max_tokens,
+            max_concurrent=settings.llm_max_concurrent,
         )
 
         # Session
@@ -170,13 +171,11 @@ class RAGContainer:
 
     def build_routes(self, query: str, history: list[dict]) -> list:
         """
-        根据 DomainPlugin 的分级规则生成多路检索路由。
+        根据 DomainPlugin 的分级规则生成多路检索路由（同步，供 ai_app2/ai_app3 直接调用）。
 
         Returns:
             list[QueryRoute]，第一条为原始/改写后的主 query。
         """
-        from rag_framework.domain.base import QueryRoute
-
         level = self.domain.rewrite_router_rules(query, history)
 
         if level == 2 and self.llm_rewriter is not None:
@@ -185,6 +184,5 @@ class RAGContainer:
         if level == 1 and self.rule_rewriter is not None:
             return self.rule_rewriter.rewrite(query, history)
 
-        # Level 0：只做查询分类，不扩写
         route = self.domain.classify_query(query, history)
         return [route]

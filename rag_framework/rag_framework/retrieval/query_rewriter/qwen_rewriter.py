@@ -62,9 +62,16 @@ class QwenQueryRewriter(QueryRewriter):
             t0 = time.monotonic()
 
             tokenizer = AutoTokenizer.from_pretrained(self._model_path)
+            # device_map 需要 accelerate 处理设备放置和 tied weight 解析
             model = AutoModelForCausalLM.from_pretrained(
-                self._model_path, torch_dtype=dtype
-            ).to(device)
+                self._model_path,
+                dtype=dtype,
+                device_map=device,
+            )
+            # Qwen2 lm_head.weight 是 tied weight，LOAD REPORT 中显示 MISSING 属正常；
+            # 但 accelerate 路径不保证自动调用 tie_weights()，须显式绑定，
+            # 否则 lm_head 使用随机初始化权重，推理输出为乱码。
+            model.tie_weights()
             model.eval()
 
             self._tokenizer = tokenizer
@@ -100,7 +107,7 @@ class QwenQueryRewriter(QueryRewriter):
         if not lines:
             _logger.warning(
                 f"LLM 改写返回空结果 ({elapsed*1000:.0f}ms), model={model_label!r}，"
-                f"降级返回原始 query"
+                f"raw={raw!r}，降级返回原始 query"
             )
             return [QueryRoute(text=query, type="original", weight=1.0)]
 
@@ -143,13 +150,14 @@ class QwenQueryRewriter(QueryRewriter):
         text = self._tokenizer.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True
         )
-        inputs = self._tokenizer([text], return_tensors="pt").to(self._device)
+        inputs = self._tokenizer([text], return_tensors="pt").to(self._model.device)
 
         with torch.no_grad():
             output_ids = self._model.generate(
                 **inputs,
                 max_new_tokens=self._max_new_tokens,
                 do_sample=False,
+                repetition_penalty=1.1,   # 防止小模型陷入 token 重复循环输出乱码
             )
 
         new_ids = output_ids[0][inputs.input_ids.shape[1]:]
@@ -162,10 +170,23 @@ class QwenQueryRewriter(QueryRewriter):
         try:
             parsed = json.loads(cleaned)
             if isinstance(parsed, list):
-                return [s for s in parsed if isinstance(s, str) and s.strip()]
+                result = [s.strip() for s in parsed if isinstance(s, str) and s.strip()]
+                if result:
+                    return result
         except json.JSONDecodeError:
             pass
         # 降级：按行解析
-        lines = [ln.strip().lstrip("-•·").strip() for ln in raw.splitlines() if ln.strip()]
-        lines = [ln for ln in lines if ln and ln != fallback]
+        lines = []
+        for ln in raw.splitlines():
+            ln = ln.strip()
+            if not ln:
+                continue
+            # 提取 Markdown 链接文本 [text](url) → text
+            ln = re.sub(r"\[([^\]]+)\]\([^\)]*\)", r"\1", ln)
+            # 去除编号前缀：1. / 1、 / 1) 以及 [1. ...]
+            ln = re.sub(r"^\s*\[?\s*[\d]+[.、)]\s*", "", ln).strip()
+            # 去除符号前缀
+            ln = ln.lstrip("-•·").strip()
+            if ln:
+                lines.append(ln)
         return lines

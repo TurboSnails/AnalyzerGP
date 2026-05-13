@@ -1,20 +1,25 @@
 """
 Hybrid Retriever — 混合检索 + RRF 融合 + Rerank + Lost-in-Middle
 
-编排 Dense、HyDE、BM25 多路召回，融合后精排。
+编排 Dense、HyDE、BM25 多路异步并发召回，融合后精排。
+
+并发模型：
+  - 每路检索（Dense/HyDE/BM25）通过 asyncio.to_thread 卸载到线程池
+  - asyncio.gather 并发执行所有路，asyncio.wait_for 控制单路超时
+  - Rerank（CrossEncoder GPU 推理）同样 to_thread + timeout
+  - fetch_parents（ChromaDB 批量 get）to_thread + timeout
 """
 from __future__ import annotations
 
+import asyncio
 import time
-from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from rag_framework.core.config import RAGSettings
 from rag_framework.core.logger import retrieval_logger
 from rag_framework.domain.base import DomainPlugin, QueryRoute
 from rag_framework.retrieval.base import Retriever, RetrievalResult, RetrievedDoc
-
 from rag_framework.rerank.base import Reranker, RankedDoc
 
 if TYPE_CHECKING:
@@ -38,21 +43,23 @@ class HybridConfig:
     enable_bm25: bool = True
     enable_rerank: bool = True
     enable_lost_in_middle: bool = True
+    branch_timeout: float = 10.0    # 单路检索超时（秒）
+    rerank_timeout: float = 15.0    # Rerank 超时（秒）
 
 
 class HybridRetriever(Retriever):
     """
     混合检索器。
 
-    多路并发召回 → Weighted RRF 融合 → CrossEncoder 精排 → Lost-in-Middle 重排。
+    多路异步并发召回 → Weighted RRF 融合 → CrossEncoder 精排 → Lost-in-Middle 重排。
     """
 
     def __init__(
         self,
         settings: RAGSettings,
-        embedder: Embedder,
-        dense_store: DenseStore,
-        sparse_store: BM25Store,
+        embedder: "Embedder",
+        dense_store: "DenseStore",
+        sparse_store: "BM25Store",
         reranker: Reranker,
         domain: DomainPlugin,
     ) -> None:
@@ -64,6 +71,8 @@ class HybridRetriever(Retriever):
             rerank_top_k=settings.rerank_top_k,
             max_child_distance=settings.max_child_distance,
             low_confidence_threshold=settings.low_confidence_threshold,
+            branch_timeout=settings.retrieval_branch_timeout,
+            rerank_timeout=settings.retrieval_rerank_timeout,
         )
         self._embedder = embedder
         self._dense = dense_store
@@ -71,7 +80,7 @@ class HybridRetriever(Retriever):
         self._reranker = reranker
         self._domain = domain
 
-    def retrieve(
+    async def retrieve(
         self,
         query: str | QueryRoute | list[QueryRoute],
         top_k: int = 10,
@@ -94,30 +103,37 @@ class HybridRetriever(Retriever):
 
         # 检查 v2 collections
         col_parent = self._dense.get_collection(collections.parent)
-        col_child = self._dense.get_collection(collections.child)
-        col_hyde = self._dense.get_collection(collections.hyde)
+        col_child  = self._dense.get_collection(collections.child)
+        col_hyde   = self._dense.get_collection(collections.hyde)
         v2_ready = all(c is not None for c in [col_parent, col_child, col_hyde])
 
         if not v2_ready:
             retrieval_logger.warning("v2 collections 未就绪，回退旧版单路检索")
-            return self._legacy_retrieve(original_query)
+            return await self._legacy_retrieve(original_query)
 
-        # 多路并发召回
+        # ── 多路异步并发召回 ────────────────────────────────────────────────────
         t1 = time.perf_counter()
-        weighted_lists, pid_best_dense, pid_best_bm25 = self._multi_route_fetch(
+        weighted_lists, pid_best_dense, pid_best_bm25 = await self._async_multi_route_fetch(
             queries, collections
         )
         t_fetch = time.perf_counter() - t1
 
-        # Weighted RRF 融合
-        rrf_results = self._rrf_merge(weighted_lists)
+        # ── Weighted RRF 融合 ───────────────────────────────────────────────────
+        rrf_results  = self._rrf_merge(weighted_lists)
         rrf_score_map = {pid: score for pid, score in rrf_results}
-        top20_ids = [pid for pid, _ in rrf_results[:20]]
+        top20_ids    = [pid for pid, _ in rrf_results[:20]]
 
-        # 拉取 parent 文本
-        parent_texts = self._dense.fetch_parents(top20_ids, collections.parent)
+        # ── 拉取 parent 文本（to_thread，避免阻塞 event loop）────────────────────
+        try:
+            parent_texts = await asyncio.wait_for(
+                asyncio.to_thread(self._dense.fetch_parents, top20_ids, collections.parent),
+                timeout=self._cfg.branch_timeout,
+            )
+        except asyncio.TimeoutError:
+            retrieval_logger.warning("fetch_parents 超时，返回空结果")
+            return RetrievalResult(docs=[], latency_ms=(time.perf_counter() - t0) * 1000)
 
-        # 构建候选
+        # ── 构建候选列表 ─────────────────────────────────────────────────────────
         seen: set[str] = set()
         candidates: list[RankedDoc] = []
         for pid in top20_ids:
@@ -134,17 +150,36 @@ class HybridRetriever(Retriever):
         if not candidates:
             return RetrievalResult(docs=[], latency_ms=(time.perf_counter() - t0) * 1000)
 
-        # 精排
+        # ── Rerank（CrossEncoder，to_thread + timeout）───────────────────────────
         if self._cfg.enable_rerank:
-            reranked = self._reranker.rerank(original_query, candidates, top_k=self._cfg.rerank_top_k)
+            try:
+                reranked = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        self._reranker.rerank,
+                        original_query,
+                        candidates,
+                        self._cfg.rerank_top_k,
+                    ),
+                    timeout=self._cfg.rerank_timeout,
+                )
+            except asyncio.TimeoutError:
+                retrieval_logger.warning(f"Rerank 超时（>{self._cfg.rerank_timeout}s），降级 RRF 排序")
+                for c in candidates:
+                    c.score = c.rrf_score
+                    c.ce_score = 0.0
+                reranked = sorted(candidates, key=lambda x: x.score, reverse=True)[
+                    : self._cfg.rerank_top_k
+                ]
         else:
             for c in candidates:
                 c.score = c.rrf_score
-            reranked = sorted(candidates, key=lambda x: x.score, reverse=True)[:self._cfg.rerank_top_k]
+            reranked = sorted(candidates, key=lambda x: x.score, reverse=True)[
+                : self._cfg.rerank_top_k
+            ]
 
         top_ce = float(reranked[0].ce_score) if reranked else 0.0
 
-        # Lost-in-Middle 重排
+        # ── Lost-in-Middle 重排 ──────────────────────────────────────────────────
         ordered = self._lost_in_middle(reranked) if self._cfg.enable_lost_in_middle else reranked
 
         docs = [
@@ -176,53 +211,71 @@ class HybridRetriever(Retriever):
             metadata={"top_ce": top_ce, "n_chunks": len(docs)},
         )
 
-    # ─── 内部方法 ───────────────────────────────────────────────────────────────
+    # ─── 异步并发多路召回 ────────────────────────────────────────────────────────
 
-    def _multi_route_fetch(
+    async def _async_multi_route_fetch(
         self,
         queries: list[QueryRoute],
         collections,
     ) -> tuple[list[tuple[list[str], float]], dict[str, int], dict[str, int]]:
+        """
+        用 asyncio.gather 并发执行所有检索分支，每路独立 timeout。
+        各分支在线程池中运行（to_thread），不阻塞事件循环。
+        """
+        task_meta: list[tuple[str, float]] = []   # (kind, weight)
+        coros: list = []
+
+        for q in queries:
+            if "dense" in q.routes and self._cfg.enable_dense:
+                coros.append(asyncio.wait_for(
+                    asyncio.to_thread(self._query_dense, q.text, collections.child),
+                    timeout=self._cfg.branch_timeout,
+                ))
+                task_meta.append(("dense", q.weight))
+
+            if "hyde" in q.routes and self._cfg.enable_hyde:
+                coros.append(asyncio.wait_for(
+                    asyncio.to_thread(self._query_dense, q.text, collections.hyde),
+                    timeout=self._cfg.branch_timeout,
+                ))
+                task_meta.append(("hyde", q.weight))
+
+            if "bm25" in q.routes and self._cfg.enable_bm25:
+                coros.append(asyncio.wait_for(
+                    asyncio.to_thread(self._sparse.search, q.text, self._cfg.bm25_top_k),
+                    timeout=self._cfg.branch_timeout,
+                ))
+                task_meta.append(("bm25", q.weight))
+
+        # 并发执行，单路超时不中断其他路
+        results = await asyncio.gather(*coros, return_exceptions=True)
+
         weighted_lists: list[tuple[list[str], float]] = []
         pid_best_dense: dict[str, int] = {}
         pid_best_bm25: dict[str, int] = {}
 
-        n_tasks = sum(len(q.routes) for q in queries)
-        with ThreadPoolExecutor(max_workers=max(n_tasks, 1)) as pool:
-            futures = []
-            for q in queries:
-                if "dense" in q.routes and self._cfg.enable_dense:
-                    futures.append((
-                        "dense", q.weight,
-                        pool.submit(self._query_dense, q.text, collections.child)
-                    ))
-                if "hyde" in q.routes and self._cfg.enable_hyde:
-                    futures.append((
-                        "hyde", q.weight,
-                        pool.submit(self._query_dense, q.text, collections.hyde)
-                    ))
-                if "bm25" in q.routes and self._cfg.enable_bm25:
-                    futures.append((
-                        "bm25", q.weight,
-                        pool.submit(self._sparse.search, q.text, self._cfg.bm25_top_k)
-                    ))
+        for (kind, weight), result in zip(task_meta, results):
+            if isinstance(result, (Exception, asyncio.TimeoutError)):
+                retrieval_logger.warning(f"{kind} 分支失败/超时: {result!r}")
+                continue
 
-            for kind, weight, f in futures:
-                result = f.result()
-                if kind == "bm25":
-                    pids = [r[0] for r in result]
-                    for rank, pid in enumerate(pids):
-                        pid_best_bm25[pid] = min(pid_best_bm25.get(pid, 999), rank)
-                else:
-                    pids = result
-                    for rank, pid in enumerate(pids):
-                        pid_best_dense[pid] = min(pid_best_dense.get(pid, 999), rank)
-                weighted_lists.append((pids, weight))
+            if kind == "bm25":
+                pids = [r[0] for r in result]
+                for rank, pid in enumerate(pids):
+                    pid_best_bm25[pid] = min(pid_best_bm25.get(pid, 999), rank)
+            else:
+                pids = result
+                for rank, pid in enumerate(pids):
+                    pid_best_dense[pid] = min(pid_best_dense.get(pid, 999), rank)
+
+            weighted_lists.append((pids, weight))
 
         return weighted_lists, pid_best_dense, pid_best_bm25
 
+    # ─── 同步子步骤（在线程中运行）────────────────────────────────────────────────
+
     def _query_dense(self, query: str, collection_name: str) -> list[str]:
-        """向量检索 → parent_id 聚合。"""
+        """向量检索 → parent_id 聚合（同步，由 to_thread 调用）。"""
         try:
             ids, distances, metas = self._dense.query(
                 query, collection_name,
@@ -237,13 +290,14 @@ class HybridRetriever(Retriever):
             if pid:
                 parent_hits.setdefault(pid, []).append(dist)
 
-        scored = []
-        for pid, dists in parent_hits.items():
-            score = min(dists) - 0.05 * (len(dists) - 1)
-            scored.append((pid, score))
-
+        scored = [
+            (pid, min(dists) - 0.05 * (len(dists) - 1))
+            for pid, dists in parent_hits.items()
+        ]
         scored.sort(key=lambda x: x[1])
-        return [s[0] for s in scored[:self._cfg.dense_top_k]]
+        return [s[0] for s in scored[: self._cfg.dense_top_k]]
+
+    # ─── 纯函数工具 ─────────────────────────────────────────────────────────────
 
     @staticmethod
     def _rrf_merge(ranked_lists: list[tuple[list[str], float]]) -> list[tuple[str, float]]:
@@ -255,25 +309,33 @@ class HybridRetriever(Retriever):
 
     @staticmethod
     def _lost_in_middle(chunks: list[RankedDoc]) -> list[RankedDoc]:
-        """Lost-in-the-Middle 重排：最相关首位，次相关末位。"""
+        """最相关首位，次相关末位，其余居中。"""
         if len(chunks) <= 2:
             return chunks
         return [chunks[0]] + chunks[2:] + [chunks[1]]
 
-    def _legacy_retrieve(self, query: str) -> RetrievalResult:
-        """旧版单路检索回退。"""
-        # 简化实现：直接查 parent collection
+    # ─── 降级路径 ────────────────────────────────────────────────────────────────
+
+    async def _legacy_retrieve(self, query: str) -> RetrievalResult:
+        """旧版单路检索回退（无 child/hyde collection 时）。"""
         collections = self._domain.get_collection_names()
         try:
-            ids, distances, _ = self._dense.query(
-                query, collections.parent, n_results=5, max_distance=1.2
+            hit_ids, distances, _ = await asyncio.wait_for(
+                asyncio.to_thread(
+                    self._dense.query,
+                    query, collections.parent, 5, 1.2,
+                ),
+                timeout=self._cfg.branch_timeout,
             )
-            if not ids:
+            if not hit_ids:
                 return RetrievalResult(docs=[], query=query)
-            texts = self._dense.fetch_parents(ids, collections.parent)
+            texts = await asyncio.wait_for(
+                asyncio.to_thread(self._dense.fetch_parents, hit_ids, collections.parent),
+                timeout=self._cfg.branch_timeout,
+            )
             docs = [
                 RetrievedDoc(id=i, text=texts.get(i, ""), score=1.0 - d)
-                for i, d in zip(ids, distances)
+                for i, d in zip(hit_ids, distances)
                 if i in texts
             ]
             return RetrievalResult(docs=docs, query=query)

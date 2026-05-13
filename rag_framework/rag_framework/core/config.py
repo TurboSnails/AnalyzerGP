@@ -212,6 +212,11 @@ class RAGSettings(BaseSettings):
     # ── Domain ───────────────────────────────────────────────────────────────
     active_domain: str = "android"
 
+    # ── Concurrency & Timeout ─────────────────────────────────────────────────
+    llm_max_concurrent: int = 3              # LLM API 最大并发数（Semaphore 门控）
+    retrieval_branch_timeout: float = 10.0   # 单路检索（Dense/BM25）超时秒数
+    retrieval_rerank_timeout: float = 15.0   # Rerank 超时秒数
+
     # ── Logging ──────────────────────────────────────────────────────────────
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
     log_format: str = "%(asctime)s [%(levelname)s] %(name)s - %(message)s"

@@ -127,11 +127,12 @@ class SessionManager:
         session_logger.info(f"Rewrite level={level}: 跳过改写, route_type={route.type!r}")
         return [route]
 
-    def build_messages(self, session: SessionData, req_msg: str) -> list[dict]:
+    async def build_messages(self, session: SessionData, req_msg: str) -> list[dict]:
         """
         构建完整 messages（含检索上下文）。
 
         顺序：system → summary → history → [token 预警] → retrieved context
+        retrieve() 为 async，在此 await 不阻塞事件循环。
         """
         messages = self._build_raw_messages(session)
 
@@ -145,8 +146,8 @@ class SessionManager:
         routes = self._build_routes(req_msg, session.history)
         session_logger.info(f"检索路由: routes={[r.type for r in routes]}")
 
-        # 2. 多路检索
-        result = self._retriever.retrieve(routes)
+        # 2. 异步多路检索
+        result = await self._retriever.retrieve(routes)
         context = "\n\n".join(d.text for d in result.docs) if result.docs else ""
         top_ce = result.metadata.get("top_ce", 0.0)
         n_chunks = len(result.docs)
@@ -186,7 +187,7 @@ class SessionManager:
         session = self.get_session(user_id)
         self.add_user_message(session, query)
 
-        messages = self.build_messages(session, query)
+        messages = await self.build_messages(session, query)
         full_reply = ""
 
         async for chunk in self._llm.chat_stream(messages, use_tools=False):

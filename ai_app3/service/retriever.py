@@ -2,8 +2,7 @@
 Retriever adapter — 将 rag_framework 的 HybridRetriever 封装为简单的 query_context() 接口，
 供 ai_app3 的 Agentic RAG 节点和工具调用。
 
-替代原 ai_app1.service.vector_store.query_db()，使用 rag_framework 统一容器，
-保持 Dense+HyDE+BM25+RRF+Rerank+Lost-in-Middle 完整检索链路。
+retrieve() 现为 async，调用方需 await。
 """
 from __future__ import annotations
 
@@ -22,19 +21,19 @@ def _get_container() -> RAGContainer:
     return _container
 
 
-def query_context(query: str, top_k: int = 5, history: list[dict] | None = None) -> str | None:
+async def query_context(query: str, top_k: int = 5, history: list[dict] | None = None) -> str | None:
     """
-    执行混合检索，返回格式化的上下文文本。
+    执行混合检索，返回格式化的上下文文本（async）。
 
-    接口与原 ai_app1.service.vector_store.query_db() 兼容，内部通过
-    rag_framework.HybridRetriever 执行 Rewrite→Classify→Dense+HyDE+BM25+RRF+Rerank+Lost-in-Middle。
+    内部通过 rag_framework.HybridRetriever 执行
+    Rewrite→Classify→Dense+HyDE+BM25+RRF+Rerank+Lost-in-Middle。
     """
     if not query or not query.strip():
         return None
     try:
         container = _get_container()
         routes = container.build_routes(query, history or [])
-        result = container.retriever.retrieve(routes, top_k=top_k)
+        result = await container.retriever.retrieve(routes, top_k=top_k)
         if not result.docs:
             retrieve_logger.info(f"检索无结果: query={query[:30]!r}")
             return None
