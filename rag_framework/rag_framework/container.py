@@ -10,7 +10,7 @@ from typing import Any
 
 from rag_framework.core.config import RAGSettings
 from rag_framework.core.logger import setup_logging
-from rag_framework.core.registry import get_domain
+from rag_framework.core.registry import get_domain, list_domains
 from rag_framework.domain.base import DomainPlugin
 from rag_framework.embedding.base import Embedder
 from rag_framework.embedding.sentence_transformer import STEmbedder
@@ -108,7 +108,21 @@ class RAGContainer:
             default_budget=settings.default_token_budget,
         )
 
-        # Domain
+        # Domain — 若尚未注册，自动发现并加载领域插件包
+        if settings.active_domain not in list_domains():
+            try:
+                import importlib
+                import sys
+                repo_root = Path(__file__).resolve().parents[2]
+                domain_pkg = repo_root / "domains" / settings.active_domain
+                if domain_pkg.is_dir():
+                    pkg_path = str(domain_pkg)
+                    if pkg_path not in sys.path:
+                        sys.path.insert(0, pkg_path)
+                importlib.import_module(f"{settings.active_domain}_domain")
+            except Exception:
+                pass
+
         domain = get_domain(settings.active_domain)
 
         # Hybrid Retriever (依赖 domain 的 collection names)

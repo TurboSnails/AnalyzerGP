@@ -16,6 +16,7 @@ import re
 from pathlib import Path
 
 from rag_framework.core.logger import retrieval_logger
+from rag_framework.core.registry import register_domain
 from rag_framework.domain.base import (
     DomainPlugin,
     CollectionNames,
@@ -179,3 +180,6 @@ _VAGUE_TERMS = frozenset([
     "怎么回事", "什么意思", "什么原因", "为什么会", "这是为什么", "啥原因",
     "什么鬼", "啥情况", "搞不懂", "不明白",
 ])
+
+# 模块导入时自动注册领域插件
+register_domain(AndroidDomainPlugin)

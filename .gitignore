@@ -38,9 +38,19 @@ env/
 .DS_Store
 
 # ─── Environment / Secrets ──────────────────────────────────────
+# 永远不要提交真实的 .env 文件！
+# 仅提交 .env.example 作为模板。
 .env
-.env.*
+.env.local
+.env.*.local
+# 允许提交模板文件（注意：规则顺序很重要）
 !.env.example
+!.env.*.example
+
+# 额外敏感文件保护
+*.key
+*.pem
+secrets/
 
 # ─── Data / Models / Indexes (project-specific) ─────────────────
 /models/
