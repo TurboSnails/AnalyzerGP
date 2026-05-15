@@ -116,6 +116,13 @@ class HybridRetriever(Retriever):
         trace.original_query = original_query
         trace.query = original_query
 
+        # 从多路路由中提取改写查询（第一个非 original 类型的 route）
+        for q in queries[1:]:
+            if q.type != "original" and q.text != original_query:
+                trace.rewritten_query = q.text
+                trace.rewrite_type = q.type
+                break
+
         collections = self._domain.get_collection_names()
 
         # 检查 v2 collections
