@@ -1,3 +1,7 @@
 {
-    "gitConfigUser.selectedProfile": "Hassan"
+    "python.terminal.executeInFileDir": false,
+    "python.analysis.extraPaths": [
+        "rag_framework",
+        "domains/android"
+    ]
 }

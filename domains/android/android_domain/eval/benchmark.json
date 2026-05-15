@@ -1,58 +1,636 @@
 [
   {
-    "query": "为什么我的 Activity 总是报内存泄露，有哪些常见的坑需要避开？",
-    "expected_chunk": "内存防漏",
-    "evidence": "警惕静态变量持有 Context 以及非静态内部类导致的泄露。"
-  },
-  {
-    "query": "在 Android 架构设计中，为了避免 Activity 逻辑过于臃肿，官方推荐的最佳实践是什么？",
+    "_comment": "=================== 一、架构设计 / 架构解耦 ===================",
+    "query": "Android 官方推荐的架构模式是什么，为什么 Activity 不应该包含业务逻辑？",
     "expected_chunk": "架构解耦",
-    "evidence": "避免 Activity 变成“全能管家”，将逻辑抽离到 ViewModel。"
+    "evidence": "MVVM（ViewModel + LiveData/Flow）架构。Activity 只负责显示 UI 和监听用户交互，业务逻辑交给 ViewModel",
+    "difficulty": "standard"
   },
   {
-    "query": "我正在处理一个网络请求，可以直接在主线程拿到结果后更新 TextView 吗？",
-    "expected_chunk": "线程与异步",
-    "evidence": [
-      "UI线程",
-      "ANR",
-      "主线程",
-      "子线程"
-    ]
-  },
-  {
-    "query": "文档中提到的 8 大核心模块主要包含哪些维度的优化？",
-    "expected_chunk": "核心模块概览",
-    "evidence": "涵盖了从 MVVM 架构设计、内存与布局优化 到 系统版本适配 等 8 大核心模块。"
-  },
-  {
-    "json_comment": "以下为复杂/跨段落总结型问题",
-    "query": "如果我要提升应用的整体响应速度和稳定性，文档给出了哪几个层面的建议？",
-    "expected_chunk": "架构解耦 / 内存防漏 / 线程安全",
-    "evidence": "通过 ViewModel 实现架构解耦减少逻辑堆积；通过内存防漏避免系统回收压力；通过线程安全隔离耗时操作确保 UI 顺滑。"
-  },
-  {
-    "query": "针对数据库操作和代码混淆，文档中提到的进阶学习点是什么？",
-    "expected_chunk": "深入解读模块",
-    "evidence": "如何具体配置 R8 混淆或 Room 数据库。"
-  },
-  {
-    "query": "Android 系统版本适配时，需要重点关注哪些变化？",
-    "expected_chunk": "系统适配",
-    "evidence": "Android 10+ 分区存储、Android 12+ 启动页 API、Android 13+ 通知权限"
-  },
-  {
-    "query": "开发者在编写非静态内部类时需要注意什么？",
-    "expected_chunk": "内存防漏",
-    "evidence": "非静态内部类可能导致内存泄露。"
-  },
-  {
-    "query": "ViewModel 在 MVVM 模式中扮演的具体角色是什么？",
+    "query": "ViewModel 在 MVVM 中起什么作用，它和 Activity 的关系是什么？",
     "expected_chunk": "架构解耦",
-    "evidence": "将逻辑从 Activity 中抽离出来，解决 Activity 职能过重的问题。"
+    "evidence": "ViewModel 为 UI 层准备和管理数据，在配置变更时存活，不持有 View 引用",
+    "difficulty": "standard"
   },
   {
-    "query": "如何处理 Android 中的耗时任务才不会导致应用卡死？",
+    "query": "Repository 模式在 Android 架构中的职责是什么？",
+    "expected_chunk": "架构解耦",
+    "evidence": "数据获取交给 Repository，封装 Room、Retrofit 等数据源",
+    "difficulty": "standard"
+  },
+  {
+    "query": "Activity 生命周期管理中，异步回调需要注意什么？",
+    "expected_chunk": "架构解耦",
+    "evidence": "异步回调中一定要检查 UI 组件是否已经销毁",
+    "difficulty": "standard"
+  },
+  {
+    "query": "ViewModle 为什么在配置变更后能保留数据？",
+    "expected_chunk": "架构解耦",
+    "evidence": "ViewModel 在配置变更时存活，避免数据丢失",
+    "difficulty": "typo"
+  },
+  {
+    "query": "Acitvity 超过 1000 行该怎么重构？",
+    "expected_chunk": "架构解耦",
+    "evidence": "Activity 超过 1000 行说明该重构了，业务逻辑交给 ViewModel",
+    "difficulty": "typo"
+  },
+  {
+    "query": "代码写得太乱了怎么办？",
+    "expected_chunk": "架构解耦",
+    "evidence": "单一职责原则，一个类只做一件事",
+    "difficulty": "vague"
+  },
+  {
+    "query": "ViewModel + LiveData + Repository 三者如何协作？",
+    "expected_chunk": "架构解耦",
+    "evidence": "ViewModel 管理数据，LiveData 观察数据变化，Repository 封装数据源",
+    "difficulty": "multi_hop"
+  },
+  {
+    "query": "lifecycleScope 和 viewModelScope 有什么区别？",
+    "expected_chunk": "架构解耦",
+    "evidence": "lifecycleScope 自动管理协程，viewModelScope 在 ViewModel 生命周期内运行",
+    "difficulty": "code_switching"
+  },
+  {
+    "query": "我现在的项目所有网络请求、数据库操作、UI更新逻辑都写在Activity里，Activity代码已经超过1500行了，导致每次修改都很痛苦，测试也很困难。我想重构但不知道从哪里开始，官方推荐的做法是什么？",
+    "expected_chunk": "架构解耦",
+    "evidence": "推荐 MVVM 架构，Activity 只负责显示 UI，业务逻辑交给 ViewModel，数据获取交给 Repository",
+    "difficulty": "long_query"
+  },
+  {
+    "query": "我觉得 MVVM 太麻烦了，直接把逻辑都写在 Activity 里更简单，反正项目能跑就行。",
+    "expected_chunk": "架构解耦",
+    "evidence": "避免 Activity 变成全能管家，Activity 超过 1000 行说明该重构了",
+    "difficulty": "adversarial"
+  },
+  {
+    "_comment": "=================== 二、内存优化 / 内存防漏 ===================",
+    "query": "Android 中常见的内存泄漏原因有哪些？",
+    "expected_chunk": "内存防漏",
+    "evidence": "静态变量持有 Context、非静态内部类隐式持有外部类引用、未取消的定时器",
+    "difficulty": "standard"
+  },
+  {
+    "query": "Handler 内存泄漏是怎么产生的，如何解决？",
+    "expected_chunk": "内存防漏",
+    "evidence": "非静态内部类 Handler 隐式持有外部 Activity 引用，使用静态内部类 + WeakReference",
+    "difficulty": "standard"
+  },
+  {
+    "query": "为什么静态变量持有 Context 会导致内存泄漏？",
+    "expected_chunk": "内存防漏",
+    "evidence": "严禁在静态变量中持有 Context、View 或 Activity 的引用，Activity 即使销毁了也无法被 GC 回收",
+    "difficulty": "standard"
+  },
+  {
+    "query": "Bitmap 大图加载时应该如何避免 OOM？",
+    "expected_chunk": "内存防漏",
+    "evidence": "不要直接加载原图，必须根据 View 的实际大小进行压缩，推荐使用 Glide 或 Coil",
+    "difficulty": "standard"
+  },
+  {
+    "query": "Hanlder 为什么会导致内存泄漏？",
+    "expected_chunk": "内存防漏",
+    "evidence": "Handler 内存泄漏，非静态内部类隐式持有外部类引用",
+    "difficulty": "typo"
+  },
+  {
+    "query": "OOM 是什么，怎么解决 OutOfMemeryError？",
+    "expected_chunk": "内存防漏",
+    "evidence": "内存溢出，不要直接加载原图，使用 Glide 或 Coil",
+    "difficulty": "typo"
+  },
+  {
+    "query": "手机越来越卡是为什么？",
+    "expected_chunk": "内存防漏",
+    "evidence": "内存泄漏是应用卡顿甚至崩溃的元凶",
+    "difficulty": "vague"
+  },
+  {
+    "query": "静态变量持有 Activity 引用，同时又在 Handler 里发延时消息，会导致什么问题？",
+    "expected_chunk": "内存防漏",
+    "evidence": "静态变量持有 Context 导致无法 GC 回收，非静态内部类 Handler 隐式持有外部引用",
+    "difficulty": "multi_hop"
+  },
+  {
+    "query": "WeakReference 在 Handler 中怎么使用？",
+    "expected_chunk": "内存防漏",
+    "evidence": "建议使用静态内部类 + 弱引用（WeakReference）",
+    "difficulty": "code_switching"
+  },
+  {
+    "query": "我的应用运行一段时间后变得越来越卡，用 Profiler 看内存一直在涨不下降，怀疑是内存泄漏。我使用了Handler发延时消息，还在单例里保存了Activity引用，也加载了很多大图。请问最可能的泄漏点在哪里，应该怎么排查和修复？",
+    "expected_chunk": "内存防漏",
+    "evidence": "非静态内部类 Handler 隐式持有外部引用，静态变量持有 Context 导致无法回收，大图加载要压缩",
+    "difficulty": "long_query"
+  },
+  {
+    "query": "内存泄漏有什么关系，反正现在的手机内存都很大， leak 一点无所谓。",
+    "expected_chunk": "内存防漏",
+    "evidence": "Android 设备的内存资源是有限的，内存泄漏是应用卡顿甚至崩溃的元凶",
+    "difficulty": "adversarial"
+  },
+  {
+    "_comment": "=================== 三、线程与异步 / 线程安全 ===================",
+    "query": "为什么不能在 Android 主线程执行网络请求？",
     "expected_chunk": "线程安全",
-    "evidence": "UI 线程不耗时，耗时任务应放在子线程执行。"
+    "evidence": "主线程如果阻塞超过 5 秒，系统就会抛出 ANR",
+    "difficulty": "standard"
+  },
+  {
+    "query": "ANR 是什么，什么情况下会触发？",
+    "expected_chunk": "线程安全",
+    "evidence": "UI 线程如果阻塞超过 5 秒，系统就会抛出 ANR",
+    "difficulty": "standard"
+  },
+  {
+    "query": "Kotlin Coroutine 中 Dispatchers.Main 和 Dispatchers.IO 的区别？",
+    "expected_chunk": "线程安全",
+    "evidence": "Dispatchers.Main 更新 UI，Dispatchers.IO 处理耗时任务",
+    "difficulty": "standard"
+  },
+  {
+    "query": "如何在子线程执行耗时操作后回到主线程更新 UI？",
+    "expected_chunk": "线程安全",
+    "evidence": "严禁在子线程直接更新 UI，必须通过 withContext(Dispatchers.Main) 或 post 到主线程",
+    "difficulty": "standard"
+  },
+  {
+    "query": "ANR 是什么意思，怎么避免 Applicaiton Not Responding？",
+    "expected_chunk": "线程安全",
+    "evidence": "Application Not Responding，网络请求、数据库读写必须放在子线程",
+    "difficulty": "typo"
+  },
+  {
+    "query": "Corotine 怎么切换到主线程？",
+    "expected_chunk": "线程安全",
+    "evidence": "withContext(Dispatchers.Main) 或 post 到主线程",
+    "difficulty": "typo"
+  },
+  {
+    "query": "点了按钮没反应怎么办？",
+    "expected_chunk": "线程安全",
+    "evidence": "UI 线程如果阻塞超过 5 秒，系统就会抛出 ANR",
+    "difficulty": "vague"
+  },
+  {
+    "query": "在主线程做网络请求会导致 ANR，那用 Coroutine 应该如何正确处理？",
+    "expected_chunk": "线程安全",
+    "evidence": "网络请求必须放在子线程执行，利用 Dispatchers.Main 更新 UI，Dispatchers.IO 处理耗时任务",
+    "difficulty": "multi_hop"
+  },
+  {
+    "query": "withContext(Dispatchers.IO) 和 runBlocking 有什么区别？",
+    "expected_chunk": "线程安全",
+    "evidence": "Dispatchers.IO 处理耗时任务，代码逻辑像同步代码一样清晰",
+    "difficulty": "code_switching"
+  },
+  {
+    "query": "我在 Activity 的 onCreate 里直接调用了 Retrofit 的同步请求方法，结果界面卡死了，过几秒弹出应用无响应的对话框。我听说要用异步，但不知道怎么改，用 Kotlin 协程的话应该怎么写才能既拿到数据又不卡界面？",
+    "expected_chunk": "线程安全",
+    "evidence": "耗时操作必须放在子线程执行，Kotlin 协程利用 Dispatchers.IO 处理耗时任务，Dispatchers.Main 更新 UI",
+    "difficulty": "long_query"
+  },
+  {
+    "query": "主线程睡几秒没关系吧，用户等一下就好了。",
+    "expected_chunk": "线程安全",
+    "evidence": "UI 线程如果阻塞超过 5 秒，系统就会抛出 ANR",
+    "difficulty": "adversarial"
+  },
+  {
+    "_comment": "=================== 四、UI 与布局优化 / 布局优化 ===================",
+    "query": "如何减少 Android 布局层级以提升性能？",
+    "expected_chunk": "布局优化",
+    "evidence": "使用 ConstraintLayout 实现扁平化，使用 merge 标签减少多余层级",
+    "difficulty": "standard"
+  },
+  {
+    "query": "RecyclerView 滚动卡顿的常见原因及优化方法？",
+    "expected_chunk": "布局优化",
+    "evidence": "使用 DiffUtil 计算列表差异，保持 onBindViewHolder 逻辑精简",
+    "difficulty": "standard"
+  },
+  {
+    "query": "什么是过度绘制（Overdraw），如何检测和优化？",
+    "expected_chunk": "布局优化",
+    "evidence": "检查布局背景，如果子 View 已经覆盖了父 View，就不要给父 View 设置背景颜色",
+    "difficulty": "standard"
+  },
+  {
+    "query": "DiffUtil 在 RecyclerView 中的作用是什么？",
+    "expected_chunk": "布局优化",
+    "evidence": "使用 DiffUtil 来计算列表差异，避免全局刷新 notifyDataSetChanged",
+    "difficulty": "standard"
+  },
+  {
+    "query": "RecycleView 卡顿怎么优化？",
+    "expected_chunk": "布局优化",
+    "evidence": "RecyclerView 使用 DiffUtil，保持 onBindViewHolder 逻辑精简",
+    "difficulty": "typo"
+  },
+  {
+    "query": "Overdrwa 怎么检查？",
+    "expected_chunk": "布局优化",
+    "evidence": "过度绘制，检查布局背景",
+    "difficulty": "typo"
+  },
+  {
+    "query": "列表滑动不流畅怎么办？",
+    "expected_chunk": "布局优化",
+    "evidence": "减少布局层级，保持 onBindViewHolder 逻辑精简",
+    "difficulty": "vague"
+  },
+  {
+    "query": "RecyclerView 嵌套复杂布局且 onBindViewHolder 里做耗时计算，会导致什么问题？",
+    "expected_chunk": "布局优化",
+    "evidence": "保持 onBindViewHolder 逻辑精简，不要在这里做耗时计算或创建对象",
+    "difficulty": "multi_hop"
+  },
+  {
+    "query": "ConstraintLayout 相比 LinearLayout 嵌套有什么性能优势？",
+    "expected_chunk": "布局优化",
+    "evidence": "使用 ConstraintLayout 实现扁平化，减少布局层级",
+    "difficulty": "code_switching"
+  },
+  {
+    "query": "我的页面是一个商品列表，每个 item 有图片、标题、价格和标签，RecyclerView 里有 50 个 item，但是滑动非常卡，帧率只有 20fps 左右。onBindViewHolder 里我每次都 new 了一个 SimpleDateFormat 来格式化时间，图片也是直接加载原图。请帮我分析可能的原因和优化方案。",
+    "expected_chunk": "布局优化",
+    "evidence": "保持 onBindViewHolder 逻辑精简，不要在这里做耗时计算或创建对象，不要直接加载原图",
+    "difficulty": "long_query"
+  },
+  {
+    "query": "布局层级深一点有什么关系，现在手机 CPU 这么快，用户根本感觉不出来。",
+    "expected_chunk": "布局优化",
+    "evidence": "过深的布局嵌套会导致视图树测量次数指数级增长",
+    "difficulty": "adversarial"
+  },
+  {
+    "_comment": "=================== 五、数据存储 / 数据存储 ===================",
+    "query": "SharedPreferences 的局限性和替代方案是什么？",
+    "expected_chunk": "数据存储",
+    "evidence": "SharedPreferences 同步写入磁盘，存大数据会导致卡顿甚至 ANR，替代方案是 DataStore",
+    "difficulty": "standard"
+  },
+  {
+    "query": "Room 数据库为什么不能在主线程查询？",
+    "expected_chunk": "数据存储",
+    "evidence": "Room 默认禁止主线程数据库操作，会抛出 IllegalStateException",
+    "difficulty": "standard"
+  },
+  {
+    "query": "DataStore 相比 SharedPreferences 的优势是什么？",
+    "expected_chunk": "数据存储",
+    "evidence": "DataStore 基于协程和 Flow，支持异步处理，更安全",
+    "difficulty": "standard"
+  },
+  {
+    "query": "SQLite 和 Room 的关系是什么？",
+    "expected_chunk": "数据存储",
+    "evidence": "Room 是对 SQLite 的封装，提供了编译时的 SQL 检查",
+    "difficulty": "standard"
+  },
+  {
+    "query": "SharePrefrence 存大量数据有什么问题？",
+    "expected_chunk": "数据存储",
+    "evidence": "SharedPreferences 同步写入磁盘，存大数据会导致卡顿甚至 ANR",
+    "difficulty": "typo"
+  },
+  {
+    "query": "SqLite 主线程查询为什么会崩？",
+    "expected_chunk": "数据存储",
+    "evidence": "Room 默认禁止主线程数据库操作，IllegalStateException",
+    "difficulty": "typo"
+  },
+  {
+    "query": "数据存哪里比较好？",
+    "expected_chunk": "数据存储",
+    "evidence": "SharedPreferences 仅适用于存储极少量的配置信息，Room 处理结构化本地数据",
+    "difficulty": "vague"
+  },
+  {
+    "query": "SharedPreferences 同步写入大数据导致 ANR，应该用什么替代？",
+    "expected_chunk": "数据存储",
+    "evidence": "SharedPreferences 存大数据会导致卡顿甚至 ANR，DataStore 是谷歌推荐的替代方案",
+    "difficulty": "multi_hop"
+  },
+  {
+    "query": "Room 的 @Query 注解怎么写 JOIN 查询？",
+    "expected_chunk": "数据存储",
+    "evidence": "Room 提供了编译时的 SQL 检查，@Query 注解",
+    "difficulty": "code_switching"
+  },
+  {
+    "query": "我需要存储用户的配置信息，以前一直用 SharedPreferences，但随着配置项越来越多，有几百个键值对，偶尔会出现卡顿。后来改用 Room，但是在主线程查询直接崩溃了。请问这两种存储方式分别适合什么场景，我现在的选择对吗？",
+    "expected_chunk": "数据存储",
+    "evidence": "SharedPreferences 仅适用于存储极少量的配置信息，Room 严禁在主线程访问数据库",
+    "difficulty": "long_query"
+  },
+  {
+    "query": "SharedPreferences 能存就用，反正简单，卡一下用户又不会投诉。",
+    "expected_chunk": "数据存储",
+    "evidence": "SharedPreferences 同步写入磁盘，存大数据会导致卡顿甚至 ANR",
+    "difficulty": "adversarial"
+  },
+  {
+    "_comment": "=================== 六、系统适配 / 系统适配 ===================",
+    "query": "Android 6.0 之后权限管理有什么变化？",
+    "expected_chunk": "系统适配",
+    "evidence": "Android 6.0 以后需要动态申请危险权限",
+    "difficulty": "standard"
+  },
+  {
+    "query": "Android 10+ 的分区存储（Scoped Storage）是什么？",
+    "expected_chunk": "系统适配",
+    "evidence": "Android 10+ 适配分区存储，不能再随意读写根目录",
+    "difficulty": "standard"
+  },
+  {
+    "query": "Android 13+ 通知权限变更对应用有什么影响？",
+    "expected_chunk": "系统适配",
+    "evidence": "Android 13+ 适配通知权限，需要显式申请 POST_NOTIFICATIONS 运行时权限",
+    "difficulty": "standard"
+  },
+  {
+    "query": "屏幕适配中 dp 和 px 的区别是什么？",
+    "expected_chunk": "系统适配",
+    "evidence": "避免使用绝对像素 px，统一使用 dp 和 sp",
+    "difficulty": "standard"
+  },
+  {
+    "query": "Android 10 Scroped Storage 怎么适配？",
+    "expected_chunk": "系统适配",
+    "evidence": "Scoped Storage 分区存储，不能再随意读写根目录",
+    "difficulty": "typo"
+  },
+  {
+    "query": "Android 13 POST_NOTIFCATION 权限怎么申请？",
+    "expected_chunk": "系统适配",
+    "evidence": "POST_NOTIFICATIONS 运行时权限",
+    "difficulty": "typo"
+  },
+  {
+    "query": "新版本手机出问题了怎么办？",
+    "expected_chunk": "系统适配",
+    "evidence": "Android 的碎片化是开发者永远的痛，版本适配",
+    "difficulty": "vague"
+  },
+  {
+    "query": "Android 13 通知权限拒绝后，应用还能创建通知渠道吗？",
+    "expected_chunk": "系统适配",
+    "evidence": "Android 13+ 通知权限，如果用户拒绝，应用仍然可以创建通知渠道，但通知不会显示",
+    "difficulty": "multi_hop"
+  },
+  {
+    "query": "targetSdkVersion 升级到 33 后，POST_NOTIFICATIONS 权限怎么处理？",
+    "expected_chunk": "系统适配",
+    "evidence": "Android 13 API 33，需要显式申请 POST_NOTIFICATIONS 运行时权限",
+    "difficulty": "code_switching"
+  },
+  {
+    "query": "我的应用 targetSdkVersion 是 28，最近要上架 Google Play 要求升到 33。听说 Android 10 有分区存储，Android 13 又改了通知权限，还有一些启动页 API 的变更。我担心升级后老用户会出问题，请问主要需要适配哪些点，有没有兼容老版本的方案？",
+    "expected_chunk": "系统适配",
+    "evidence": "Android 10+ Scoped Storage，Android 12+ 启动页 API，Android 13+ 通知权限",
+    "difficulty": "long_query"
+  },
+  {
+    "query": "适配新版本太麻烦了，我就保持低 targetSdk 不升级，用户还能用就行。",
+    "expected_chunk": "系统适配",
+    "evidence": "Android 的碎片化是开发者永远的痛，必须处理版本适配",
+    "difficulty": "adversarial"
+  },
+  {
+    "_comment": "=================== 七、网络请求 / 网络请求 ===================",
+    "query": "为什么 Android 网络请求要强制使用 HTTPS？",
+    "expected_chunk": "网络请求",
+    "evidence": "默认强制使用 HTTPS，不要在代码中关闭证书校验",
+    "difficulty": "standard"
+  },
+  {
+    "query": "Retrofit 和 OkHttp 的关系是什么？",
+    "expected_chunk": "网络请求",
+    "evidence": "Retrofit + OkHttp 是目前最流行的网络组合",
+    "difficulty": "standard"
+  },
+  {
+    "query": "OkHttp 拦截器（Interceptor）有哪些常见用途？",
+    "expected_chunk": "网络请求",
+    "evidence": "OkHttp 的拦截器统一处理 Token、Log 打印和缓存策略",
+    "difficulty": "standard"
+  },
+  {
+    "query": "弱网环境下网络请求应该如何优化？",
+    "expected_chunk": "网络请求",
+    "evidence": "必须设置合理的超时时间，并给用户提供友好的重试机制",
+    "difficulty": "standard"
+  },
+  {
+    "query": "Retofit 怎么配置超时时间？",
+    "expected_chunk": "网络请求",
+    "evidence": "Retrofit + OkHttp 设置合理的超时时间",
+    "difficulty": "typo"
+  },
+  {
+    "query": "OkHttp Intercepter 怎么用？",
+    "expected_chunk": "网络请求",
+    "evidence": "OkHttp Interceptor 统一处理 Token、Log 打印和缓存策略",
+    "difficulty": "typo"
+  },
+  {
+    "query": "网络请求失败了怎么办？",
+    "expected_chunk": "网络请求",
+    "evidence": "设置合理的超时时间，给用户提供友好的重试机制",
+    "difficulty": "vague"
+  },
+  {
+    "query": "弱网环境下 OkHttp 超时设置和 Retrofit 重试机制如何配合？",
+    "expected_chunk": "网络请求",
+    "evidence": "OkHttp 设置合理的超时时间，Retrofit 是目前最流行的网络组合",
+    "difficulty": "multi_hop"
+  },
+  {
+    "query": "OkHttp 的 addInterceptor 和 addNetworkInterceptor 有什么区别？",
+    "expected_chunk": "网络请求",
+    "evidence": "OkHttp 的拦截器统一处理 Token、Log 打印和缓存策略",
+    "difficulty": "code_switching"
+  },
+  {
+    "query": "我的应用在网络不好的时候经常请求失败，用户反馈体验很差。我现在用的是 Retrofit + OkHttp，但没有设置超时时间和重试机制。我想知道怎么配置合理的超时策略，以及是否需要做离线缓存，缓存应该存在哪里？",
+    "expected_chunk": "网络请求",
+    "evidence": "设置合理的超时时间，给用户提供友好的重试机制，OkHttp 拦截器处理缓存策略",
+    "difficulty": "long_query"
+  },
+  {
+    "query": "HTTP 和 HTTPS 有什么区别，我用 HTTP 开发更快，上线再改也一样。",
+    "expected_chunk": "网络请求",
+    "evidence": "默认强制使用 HTTPS，不要在代码中关闭证书校验，会导致中间人攻击",
+    "difficulty": "adversarial"
+  },
+  {
+    "_comment": "=================== 八、混淆与安全 / 混淆与安全 ===================",
+    "query": "R8/Proguard 代码混淆的作用是什么？",
+    "expected_chunk": "混淆与安全",
+    "evidence": "上线前必须开启混淆，减小 APK 体积，增加代码被反编译的难度",
+    "difficulty": "standard"
+  },
+  {
+    "query": "为什么不应该把 API Key 硬编码在代码里？",
+    "expected_chunk": "混淆与安全",
+    "evidence": "不要把 API Key、私钥等硬编码在代码里，建议放在 local.properties 中或使用 Native 层加密存储",
+    "difficulty": "standard"
+  },
+  {
+    "query": "Native 层加密存储敏感信息的优势是什么？",
+    "expected_chunk": "混淆与安全",
+    "evidence": "使用 Native 层加密存储敏感信息",
+    "difficulty": "standard"
+  },
+  {
+    "query": "代码混淆除了减小体积还有什么好处？",
+    "expected_chunk": "混淆与安全",
+    "evidence": "增加代码被反编译的难度",
+    "difficulty": "standard"
+  },
+  {
+    "query": "Progaurd 规则怎么写才不会把代码搞崩？",
+    "expected_chunk": "混淆与安全",
+    "evidence": "R8/Proguard 代码混淆",
+    "difficulty": "typo"
+  },
+  {
+    "query": "API Key 硬编码有什么风险？",
+    "expected_chunk": "混淆与安全",
+    "evidence": "不要把 API Key、私钥等硬编码在代码里",
+    "difficulty": "typo"
+  },
+  {
+    "query": "怎么防止别人反编译我的代码？",
+    "expected_chunk": "混淆与安全",
+    "evidence": "上线前必须开启混淆，增加代码被反编译的难度",
+    "difficulty": "vague"
+  },
+  {
+    "query": "代码混淆减小体积的同时如何保护 API Key 不被反编译获取？",
+    "expected_chunk": "混淆与安全",
+    "evidence": "开启混淆增加反编译难度，不要把 API Key 硬编码在代码里，使用 Native 层加密存储",
+    "difficulty": "multi_hop"
+  },
+  {
+    "query": "R8 的 keep rules 怎么写才能保留 Serializable 类？",
+    "expected_chunk": "混淆与安全",
+    "evidence": "R8/Proguard 代码混淆规则",
+    "difficulty": "code_switching"
+  },
+  {
+    "query": "我准备发布应用到应用市场，但担心代码被反编译后 API Key 和加密算法泄露。听说可以用 R8 混淆和 Native 层加密，请问这两者的防护级别分别是什么，应该如何组合使用才能最大程度保护敏感信息？",
+    "expected_chunk": "混淆与安全",
+    "evidence": "开启混淆增加反编译难度，不要把 API Key 硬编码在代码里，使用 Native 层加密存储",
+    "difficulty": "long_query"
+  },
+  {
+    "query": "混淆有什么用，现在的反编译工具都能还原，浪费编译时间。",
+    "expected_chunk": "混淆与安全",
+    "evidence": "开启混淆不仅可以减小 APK 体积，还能增加代码被反编译的难度",
+    "difficulty": "adversarial"
+  },
+  {
+    "_comment": "=================== 九、性能分析工具 / 性能分析工具 ===================",
+    "query": "Android Studio Profiler 能分析哪些性能维度？",
+    "expected_chunk": "性能分析工具",
+    "evidence": "CPU Profiler、Memory Profiler、Network Inspector",
+    "difficulty": "standard"
+  },
+  {
+    "query": "Memory Profiler 如何帮助发现内存泄漏？",
+    "expected_chunk": "性能分析工具",
+    "evidence": "Memory Profiler 实时观察内存抖动和泄露",
+    "difficulty": "standard"
+  },
+  {
+    "query": "CPU Profiler 的使用场景是什么？",
+    "expected_chunk": "性能分析工具",
+    "evidence": "CPU Profiler 查看哪个方法最耗时",
+    "difficulty": "standard"
+  },
+  {
+    "query": "Network Inspector 能监控哪些网络指标？",
+    "expected_chunk": "性能分析工具",
+    "evidence": "Network Inspector 监控网络请求的流量和响应",
+    "difficulty": "standard"
+  },
+  {
+    "query": "Andorid Studio Profiler 怎么打开？",
+    "expected_chunk": "性能分析工具",
+    "evidence": "Android Studio Profiler",
+    "difficulty": "typo"
+  },
+  {
+    "query": "Netowrk Inspector 怎么看请求耗时？",
+    "expected_chunk": "性能分析工具",
+    "evidence": "Network Inspector 监控网络请求的流量和响应",
+    "difficulty": "typo"
+  },
+  {
+    "query": "应用卡怎么找原因？",
+    "expected_chunk": "性能分析工具",
+    "evidence": "CPU Profiler 查看哪个方法最耗时，Memory Profiler 观察内存抖动",
+    "difficulty": "vague"
+  },
+  {
+    "query": "用 CPU Profiler 发现主线程耗时后，如何结合布局优化解决卡顿？",
+    "expected_chunk": "性能分析工具",
+    "evidence": "CPU Profiler 查看哪个方法最耗时，减少布局层级，使用 ConstraintLayout 实现扁平化",
+    "difficulty": "multi_hop"
+  },
+  {
+    "query": "Memory Profiler 中的 heap dump 怎么分析 retained size？",
+    "expected_chunk": "性能分析工具",
+    "evidence": "Memory Profiler 实时观察内存抖动和泄露，heap dump",
+    "difficulty": "code_switching"
+  },
+  {
+    "query": "我的应用在某些页面特别卡，我怀疑是内存泄漏或者主线程做了耗时操作。我已经打开了 Android Studio Profiler，但看到一堆数据不知道从哪里看起。请告诉我应该先看哪个 Profiler，重点看哪些指标，以及如果发现内存一直在涨该怎么定位泄漏源？",
+    "expected_chunk": "性能分析工具",
+    "evidence": "CPU Profiler 查看哪个方法最耗时，Memory Profiler 实时观察内存抖动和泄露",
+    "difficulty": "long_query"
+  },
+  {
+    "query": "Profiler 太复杂了，我凭经验就能猜到问题在哪，不需要工具。",
+    "expected_chunk": "性能分析工具",
+    "evidence": "学会使用 Android Studio Profiler，查看哪个方法最耗时，观察内存抖动和泄露",
+    "difficulty": "adversarial"
+  },
+  {
+    "_comment": "=================== 额外：跨章节多跳问题 ===================",
+    "query": "内存泄漏和 ANR 之间有什么关系，同时发生时如何优先排查？",
+    "expected_chunk": "内存防漏 / 线程安全",
+    "evidence": "内存泄漏是应用卡顿甚至崩溃的元凶，UI 线程阻塞超过 5 秒抛出 ANR",
+    "difficulty": "multi_hop"
+  },
+  {
+    "query": "ViewModel 里用 Room 查询，同时做了网络请求，旋转屏幕后数据丢失是什么原因？",
+    "expected_chunk": "架构解耦 / 数据存储",
+    "evidence": "ViewModel 在配置变更时存活，Room 严禁在主线程访问数据库",
+    "difficulty": "multi_hop"
+  },
+  {
+    "query": "RecyclerView 里加载网络图片导致卡顿和内存泄漏，应该如何综合优化？",
+    "expected_chunk": "布局优化 / 内存防漏",
+    "evidence": "保持 onBindViewHolder 逻辑精简，推荐使用 Glide 或 Coil，不要直接加载原图",
+    "difficulty": "multi_hop"
+  },
+  {
+    "query": "Jetpack Compose 重组频繁导致 ANR，是线程问题还是布局问题？",
+    "expected_chunk": "布局优化 / 线程安全",
+    "evidence": "布局层级扁平化，UI 线程不耗时，耗时任务应放在子线程",
+    "difficulty": "multi_hop"
+  },
+  {
+    "query": "代码混淆后 Retrofit 接口类找不到了，应该怎么配置 keep 规则？",
+    "expected_chunk": "混淆与安全 / 网络请求",
+    "evidence": "R8 混淆规则，Retrofit 是目前最流行的网络组合",
+    "difficulty": "multi_hop"
   }
 ]

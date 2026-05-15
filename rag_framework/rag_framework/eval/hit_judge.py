@@ -71,8 +71,24 @@ def ground_truth_ids(item: dict, chunks: list) -> set[str]:
     """
     根据 label / evidence 匹配，返回正确 chunk 的 id 集合。
 
+    支持双模式 Ground Truth：
+      1. 若 item 包含 "chunk_ids" 字段，直接做精确匹配（最高优先级）
+      2. 否则回退到 label / evidence 模糊匹配
+
     多跳题（expected_chunk 含 "/"）允许命中任意一个分支。
     """
+    # 模式一：精确 Chunk ID 匹配
+    precise_ids = item.get("chunk_ids")
+    if precise_ids:
+        if isinstance(precise_ids, str):
+            precise_ids = [precise_ids]
+        precise_set = set(precise_ids)
+        matched = {c["id"] for c in chunks if c["id"] in precise_set}
+        if matched:
+            return matched
+        # 如果精确 ID 未命中任何 chunk，记录警告并继续回退
+
+    # 模式二：标签 / evidence 模糊匹配
     expected = item.get("expected_chunk", "")
     raw_ev = item.get("evidence", "")
     evidence = " ".join(raw_ev) if isinstance(raw_ev, list) else str(raw_ev)

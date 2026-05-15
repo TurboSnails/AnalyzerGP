@@ -45,6 +45,11 @@ from rag_framework.eval.retrieval_trace import (
     record_trace,
 )
 from rag_framework.eval.rewrite_eval import run_rewrite_eval
+from rag_framework.eval.ragas_eval import (
+    RagasEvaluator,
+    RagasMetrics,
+    run_ragas_eval,
+)
 
 __all__ = [
     # metrics
@@ -98,9 +103,18 @@ __all__ = [
     "PhaseTimer",
     "LatencyBreakdownReport",
     "aggregate_phase_latencies",
+    # ragas
+    "RagasEvaluator",
+    "RagasMetrics",
+    "run_ragas_eval",
     # failure analysis
     "FailureCase",
     "FailureCollector",
     "FailureStore",
     "get_failure_collector",
+    "set_failure_collector",
+    # failure triage
+    "generate_report",
+    "TriageEngine",
+    "ROOT_CAUSE_LABELS",
 ]

@@ -32,6 +32,7 @@ from rag_framework.eval.latency_breakdown import PhaseLatency, aggregate_phase_l
 from rag_framework.eval.metrics import EvalMetrics, LatencyStats
 from rag_framework.eval.qa import run_qa_eval
 from rag_framework.eval.query_classifier import aggregate_by_type, format_type_stats
+from rag_framework.eval.ragas_eval import run_ragas_eval
 from rag_framework.eval.ranking import run_ranking_eval
 from rag_framework.eval.rerank_eval import run_rerank_eval
 from rag_framework.eval.rewrite_eval import run_rewrite_eval
@@ -91,6 +92,16 @@ async def _run_qa(
         dataset_path=dataset_path, container=container, verbose=False
     )
     return {"name": "qa", "report": report}
+
+
+async def _run_ragas(
+    container: RAGContainer | None = None,
+    dataset_path: Path | None = None,
+) -> dict:
+    report = await run_ragas_eval(
+        dataset_path=dataset_path, container=container, verbose=False
+    )
+    return {"name": "ragas", "report": report}
 
 
 # ─── 报告生成 ───────────────────────────────────────────────────────────────────
@@ -175,6 +186,16 @@ def _generate_full_report(results: list[dict]) -> str:
             )
             lines.append(f"- **平均延迟**: {rep.get('avg_latency_ms', 0):.0f}ms")
 
+        elif name == "ragas":
+            rep = r.get("report", {})
+            summary = rep.get("summary", {})
+            lines.append(f"- **模式**: {rep.get('mode', 'unknown')}")
+            lines.append(f"- **Faithfulness**: {summary.get('faithfulness', 0):.3f}")
+            lines.append(f"- **Answer Relevancy**: {summary.get('answer_relevancy', 0):.3f}")
+            lines.append(f"- **Context Recall**: {summary.get('context_recall', 0):.3f}")
+            lines.append(f"- **Context Precision**: {summary.get('context_precision', 0):.3f}")
+            lines.append(f"- **Overall**: {summary.get('overall', 0):.3f}")
+
         lines.append("")
 
     lines.append("---\n")
@@ -220,11 +241,12 @@ async def run_comprehensive_eval(
         "rewrite": lambda: _run_rewrite(container, dataset_path),
         "rerank": lambda: _run_rerank(container, dataset_path),
         "qa": lambda: _run_qa(container, qa_dataset_path),
+        "ragas": lambda: _run_ragas(container, qa_dataset_path),
     }
 
     if command == "all":
-        # 默认全量运行（不含 qa，因为 qa 需要 async + LLM-as-Judge）
-        commands = ["ranking", "rewrite", "rerank", "ablation", "hard", "qa"]
+        # 默认全量运行（不含 qa/ragas，因为需要 async + LLM-as-Judge）
+        commands = ["ranking", "rewrite", "rerank", "ablation", "hard", "qa", "ragas"]
     else:
         commands = [command]
 
@@ -300,7 +322,7 @@ def main():
         "command",
         nargs="?",
         default="all",
-        choices=["ranking", "ablation", "hard", "rewrite", "rerank", "qa", "all"],
+        choices=["ranking", "ablation", "hard", "rewrite", "rerank", "qa", "ragas", "all"],
         help="要执行的评测命令（默认 all）",
     )
     parser.add_argument(
