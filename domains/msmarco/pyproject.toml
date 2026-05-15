@@ -1,0 +1,15 @@
+[project]
+name = "msmarco-domain"
+version = "0.1.0"
+description = "MS MARCO 通用问答领域插件"
+requires-python = ">=3.11"
+dependencies = [
+    "datasets>=2.0.0",
+    "rag-framework",
+]
+
+[tool.uv.sources]
+rag-framework = { path = "../../rag_framework", editable = true }
+
+[tool.setuptools.packages.find]
+include = ["msmarco_domain*"]
