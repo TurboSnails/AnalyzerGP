@@ -30,18 +30,18 @@ _REPORT_DIR.mkdir(parents=True, exist_ok=True)
 
 # ─── 各评测模块的 lazy import wrapper ───────────────────────────────────────────
 
-def _run_ranking_eval(container: RAGContainer | None = None) -> dict:
-    metrics = run_ranking_eval(container=container, verbose=False)
+async def _run_ranking_eval(container: RAGContainer | None = None) -> dict:
+    metrics = await run_ranking_eval(container=container, verbose=False)
     return {"name": "ranking", "metrics": metrics.to_dict()}
 
 
-def _run_ablation(container: RAGContainer | None = None) -> dict:
-    results = run_ablation_study(container=container, verbose_per_query=False)
+async def _run_ablation(container: RAGContainer | None = None) -> dict:
+    results = await run_ablation_study(container=container, verbose_per_query=False)
     return {"name": "ablation", "experiments": results}
 
 
-def _run_hard_cases(container: RAGContainer | None = None, hard_path: Path | None = None) -> dict:
-    metrics = run_ranking_eval(container=container, dataset_path=hard_path, verbose=False)
+async def _run_hard_cases(container: RAGContainer | None = None, hard_path: Path | None = None) -> dict:
+    metrics = await run_ranking_eval(container=container, dataset_path=hard_path, verbose=False)
     return {"name": "hard_cases", "metrics": metrics.to_dict()}
 
 
@@ -78,9 +78,7 @@ def _generate_full_report(results: list[dict]) -> str:
         elif name == "ablation":
             lines.append(EvalMetrics.markdown_header())
             for exp in r.get("experiments", []):
-                md = EvalMetrics(**{
-                    k: v for k, v in exp["metrics"].items() if k != "latency_ms"
-                })
+                md = EvalMetrics.from_dict(exp["metrics"])
                 md.latency = _latency_from_dict(exp["metrics"]["latency_ms"])
                 md.config_summary = exp["config"]
                 lines.append(md.to_markdown_row())
@@ -141,8 +139,6 @@ async def run_experiment(
         "ranking": lambda: _run_ranking_eval(container),
         "ablation": lambda: _run_ablation(container),
         "hard": lambda: _run_hard_cases(container, hard_cases_path),
-    }
-    async_runners: dict[str, Callable] = {
         "qa": lambda: _run_qa_eval(container, qa_dataset_path),
     }
 
@@ -155,9 +151,7 @@ async def run_experiment(
         print(f"▶ 执行: {cmd} ...")
         try:
             if cmd in runners:
-                res = runners[cmd]()
-            elif cmd in async_runners:
-                res = await async_runners[cmd]()
+                res = await runners[cmd]()
             else:
                 print(f"  ⚠ 未知命令: {cmd}，跳过")
                 continue

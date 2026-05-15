@@ -1,6 +1,6 @@
 # ai_app1 - Android RAG 问答系统设计文档
 
-> 版本: 3.2 | 最后更新: 2026-05-15
+> 版本: 3.3 | 最后更新: 2026-05-15
 
 ---
 
@@ -8,7 +8,9 @@
 
 ai_app1 是一个面向 Android 开发者的 **智能问答助手**，基于 RAG (Retrieval-Augmented Generation) 架构构建。系统将《Android 开发核心注意事项与避坑指南》作为知识源，通过多路混合检索为本地 Qwen2.5 或远程 MiniMax-M2.7 等大模型提供精准上下文，回答 Android 开发中的各类技术问题。
 
-**v3.2 核心变化**：引入工厂注册表（`rag_framework/core/factories.py`）+ 生命周期协议（`Warmupable`/`Closable`），实现组件热插拔；`RAGContainer` 改为不可变 dataclass；移除所有 import-time 副作用，领域插件改为 lifespan 显式注册；API 层零全局状态，通过 FastAPI `Depends` 注入容器。
+**v3.3 核心变化**：新增完整的评测与可观测性体系 - Query 自动分类统计、Rewrite/Rerank 效果量化评测、Retrieval Trace 全链路追踪、Latency Breakdown 延迟拆解、Failure Analysis 失败分析闭环、Comprehensive Eval 综合调度器。HybridRetriever 和 SessionManager 已内嵌 Trace 记录与失败样本自动收集。
+
+> **v3.2 回顾**：引入工厂注册表（`rag_framework/core/factories.py`）+ 生命周期协议（`Warmupable`/`Closable`），实现组件热插拔；`RAGContainer` 改为不可变 dataclass；移除所有 import-time 副作用，领域插件改为 lifespan 显式注册；API 层零全局状态，通过 FastAPI `Depends` 注入容器。
 
 ---
 
@@ -698,6 +700,247 @@ uv run pytest ai_app1/tests/test_api.py -v
 
 ---
 
+### 3.10 评测与可观测性体系
+
+> **v3.3 新增**：从“能回答”迈向“稳定、可观测、可进化、可维护、可优化”。本节涵盖 Query 分类统计、Rewrite/Rerank 效果量化、检索全链路 Trace、延迟拆解、失败分析闭环、综合评测调度器六大模块。
+
+#### 3.10.1 Query 自动分类与统计
+
+`rag_framework/eval/query_classifier.py` 基于规则对评测 query 自动分类，解决“90% recall 掩盖了 10% 的致命短板”问题。
+
+**分类规则（优先级从高到低）：**
+
+| 类型 | 触发条件 | 典型场景 |
+|------|---------|---------|
+| `anaphora` | 含指代词（这个、上面、那、它）且长度 <20 | 追问“那它怎么释放？” |
+| `typo` | 含常见拼写错误（Hanlder, Acitvity 等） | 用户输入错误 |
+| `long_query` | 长度 >100 字符 | 复杂场景描述 |
+| `adversarial` | 含错误前提反问 | “是不是就不用写 onDestroy 了？” |
+| `code_switching` | 中英混合（中文字符>3 且英文单词>1） | “Fragment 生命周期” |
+| `multi_hop` | 多个技术概念连接，或 expected_chunk 含 "/" | “Handler + Thread + ANR” |
+| `vague` | 极短（<12 字）或无明确技术关键词 | “怎么优化？” |
+| `keyword` | 其余（含明确技术关键词的标准问题） | “RecyclerView 缓存机制” |
+
+**聚合输出：**
+- [`aggregate_by_type()`](rag_framework/rag_framework/eval/query_classifier.py:129) 按类型分组计算 recall@5、hit@1、MRR、平均延迟
+- [`format_type_stats()`](rag_framework/rag_framework/eval/query_classifier.py:159) 输出对齐表格，例如：
+
+```
+📊 Query 分类统计
+──────────────────────────────────────────────────────────────────────
+类型                  数量   Recall@5    Hit@1      MRR   平均延迟
+──────────────────────────────────────────────────────────────────────
+keyword                 12     91.7%    75.0%   0.812        120ms
+vague                    5     40.0%    20.0%   0.320        350ms
+multi_hop                3     20.0%     0.0%   0.150        280ms
+──────────────────────────────────────────────────────────────────────
+```
+
+在 [`run_ranking_eval()`](rag_framework/rag_framework/eval/ranking.py:136) 中已自动集成：每次评测先打印分类统计，再输出总体指标。
+
+#### 3.10.2 Rewrite 效果评测
+
+`rag_framework/eval/rewrite_eval.py` 量化 Query Rewrite 的“ before/after ”收益。
+
+**核心指标：**
+- `ΔRecall@5`、`ΔHit@1`、`ΔMRR`：rewrite 后与原始 query 的差值
+- **提升 / 下降 / 持平** 数量统计
+
+**流程：**
+1. 对原始 query 直接检索（不走 rewrite），记为 Before
+2. 走完整 `SessionManager._build_routes()`（含 L0/L1/L2 分流），记为 After
+3. 用 [`RewriteComparison`](rag_framework/rag_framework/eval/rewrite_eval.py:28) 记录 delta
+
+```python
+@dataclass
+class RewriteComparison:
+    query: str
+    rewritten: str
+    before_recall: float;  after_recall: float
+    before_hit1: float;    after_hit1: float
+    before_mrr: float;     after_mrr: float
+    delta_recall: float;   delta_hit1: float;  delta_mrr: float
+    is_improved: bool;     is_degraded: bool
+```
+
+**CLI 调用：**
+```bash
+python -m rag_framework.eval.comprehensive_eval rewrite
+# 或单独运行
+python -m rag_framework.eval.rewrite_eval
+```
+
+#### 3.10.3 Rerank 效果评测
+
+`rag_framework/eval/rerank_eval.py` 验证 CrossEncoder 是否真的把正确 chunk 推到了 top1。
+
+**核心指标：**
+
+| 指标 | 含义 |
+|------|------|
+| `Win` | 正确 chunk 从非 top1 被推到 top1 |
+| `Loss` | 正确 chunk 从 top1 被挤出 top1 |
+| `Hold` | 原本 top1，rerank 后仍是 top1 |
+| `Miss` | 原本未命中，rerank 后也未命中 |
+| `avg_rank_delta` | rerank 前后正确 chunk 平均排名变化（负数=上升） |
+
+**流程：**
+1. 获取 RRF 融合后的候选列表（rerank 前）
+2. 执行 `CrossEncoderReranker.rerank()` 获取 rerank 后列表
+3. 对比 ground truth 在两个列表中的排名位置
+
+```python
+@dataclass
+class RerankComparison:
+    before_rank: int      # rerank 前第一个 gt 的位置（1-based）
+    after_rank: int       # rerank 后位置
+    is_win: bool
+    is_loss: bool
+    is_hold: bool
+    ce_scores: list[tuple[str, float]]
+```
+
+#### 3.10.4 Retrieval Trace — 检索全链路追踪
+
+`rag_framework/eval/retrieval_trace.py` 让检索从“黑盒”变成“白盒”。
+
+**数据结构：**
+- [`BranchTrace`](rag_framework/rag_framework/eval/retrieval_trace.py:20)：单路召回分支（kind / query_text / weight / status / latency_ms / result_count / top_ids / error）
+- [`RerankTrace`](rag_framework/rag_framework/eval/retrieval_trace.py:33)：rerank 阶段（status / latency_ms / input_count / output_count / top_ce_score / error）
+- [`RetrievalTrace`](rag_framework/rag_framework/eval/retrieval_trace.py:44)：完整 trace（含 rewrite、branches、rrf、rerank、LiM、final latency）
+
+**集成点：** [`HybridRetriever.retrieve()`](rag_framework/rag_framework/retrieval/fusion.py:93) 中已内嵌 Trace 记录：
+```python
+timer = PhaseTimer()
+trace = RetrievalTrace()
+# 每个阶段结束后填充 trace
+record_trace(trace)
+logger.info(trace.print_trace())
+```
+
+**人类可读输出示例：**
+```
+╔══════════════════════════════════════════════════════════════════════╗
+║                         RETRIEVAL TRACE                              ║
+╠══════════════════════════════════════════════════════════════════════╣
+║ 原始 Query : Android 中 Handler 内存泄漏怎么解决？                     ║
+║ 改写 Query : Android Handler memory leak 原因与解决方案                ║
+║ 改写类型   : llm        耗时:    820ms                               ║
+╠══════════════════════════════════════════════════════════════════════╣
+║ 多路召回                                                             ║
+║   [✅] dense    q=Android Handler memory lea  n=10    92ms           ║
+║   [✅] hyde     q=为什么 Android Handler 会  n=5     88ms           ║
+║   [✅] bm25     q=Handler 内存泄漏           n=8      5ms           ║
+╠══════════════════════════════════════════════════════════════════════╣
+║ RRF 融合     : 输入 3 路 → 输出 12 条   1ms                          ║
+║ Rerank [✅]   : 输入 12 → 输出 3   top_ce=0.421   45ms               ║
+╠══════════════════════════════════════════════════════════════════════╣
+║ 最终结果     : 3 个片段  top_ce=0.421  总耗时=  1051ms               ║
+║ Top IDs      : android_parent_001, android_parent_042...             ║
+╚══════════════════════════════════════════════════════════════════════╝
+```
+
+**全局存储：**
+- `record_trace(trace)` → `_active_traces`（环形缓冲，上限 1000 条）
+- `get_recent_traces(n)` / `get_traces_by_query(substring)` 供调试和失败分析查询
+
+#### 3.10.5 Latency Breakdown — 延迟精细化拆解
+
+`rag_framework/eval/latency_breakdown.py` 定位 TTFT（Time To First Token）瓶颈。
+
+**PhaseLatency 字段：**
+`rewrite_ms` → `classify_ms` → `dense_ms` → `hyde_ms` → `bm25_ms` → `fetch_parents_ms` → `rrf_ms` → `rerank_ms` → `lim_ms` → `total_ms`
+
+**PhaseTimer 用法（已在 `HybridRetriever.retrieve()` 中集成）：**
+```python
+timer = PhaseTimer()
+with timer.phase("rewrite"):
+    routes = self._build_routes(...)
+timer.record("dense", dense_latency_ms)
+latency = timer.finish()   # 返回 PhaseLatency
+```
+
+**聚合报告：** [`aggregate_phase_latencies()`](rag_framework/rag_framework/eval/latency_breakdown.py:89) 自动生成：
+- 各阶段 mean / P50 / P95 / P99 / 占比
+- 自动识别 **bottleneck**（耗时最长的阶段）
+
+```
+📊 Latency Breakdown
+─────────────────────────────────────────────────────────────────
+阶段                     平均(ms)      P50      P95      P99      占比
+─────────────────────────────────────────────────────────────────
+rewrite                   820.5    800.0   1200.0   1500.0   78.2%
+dense                      92.0     90.0    120.0    150.0    8.8%
+hyde                       88.0     85.0    110.0    130.0    8.4%
+bm25                        5.0      4.0      8.0     10.0    0.5%
+rrf                         1.0      1.0      2.0      3.0    0.1%
+rerank                     45.0     42.0     60.0     75.0    4.3%
+─────────────────────────────────────────────────────────────────
+total                    1051.5   1022.0   1500.0   1800.0
+
+🔴 瓶颈阶段: rewrite
+```
+
+#### 3.10.6 Failure Analysis System — 失败分析与数据闭环
+
+`rag_framework/eval/failure_analysis.py` 自动收集“问题 query”，为迭代优化提供数据基础。
+
+**FailureCase 字段：**
+`query` / `category` / `reason` / `timestamp` / `session_id` / `trace` / `metadata`
+
+**收集维度（由 `FailureCollector` 提供）：**
+
+| 方法 | 触发场景 | 调用位置 |
+|------|---------|---------|
+| `collect_miss()` | 检索未命中 ground truth | 评测框架 / `SessionManager` |
+| `collect_low_ce()` | top_ce < 0.30（置信度低） | `SessionManager.build_messages()` |
+| `collect_rerank_loss()` | rerank 把正确 chunk 挤出 top1 | `rerank_eval` |
+| `collect_rewrite_degrade()` | rewrite 后 recall 下降 | `rewrite_eval` |
+| `collect_explicit_bad()` | 用户明确表达不满意 | 对话层（未来接入） |
+| `collect_followup()` | 检测到用户追问 | 对话层（未来接入） |
+
+**存储后端 `FailureStore`：**
+- 格式：JSON Lines（`reports/failure_cases.jsonl`）
+- 策略：内存 buffer（10 条）+ 增量刷盘，避免频繁 IO
+- 查询：`get_by_category()` / `summary()` / `print_summary()`
+
+**集成点：** [`SessionManager.build_messages()`](rag_framework/rag_framework/session/manager.py:132) 中已自动收集：
+- 检索结果为空 → `collect_miss()`
+- `top_ce < LOW_CONFIDENCE_CE_THRESHOLD` → `collect_low_ce()`
+
+#### 3.10.7 Comprehensive Eval — 综合评测调度器
+
+`rag_framework/eval/comprehensive_eval.py` 是一站式调度器，串联所有评测维度。
+
+**支持命令：**
+
+| 命令 | 说明 |
+|------|------|
+| `ranking` | 检索排序评测（含 query 分类统计） |
+| `rewrite` | Rewrite before/after 对比 |
+| `rerank` | Rerank win/loss/hold 验证 |
+| `ablation` | 消融实验（多配置对比） |
+| `hard` | 困难样本专项评测 |
+| `qa` | 端到端 QA + LLM-as-Judge |
+| `all` | 默认全量运行（不含 qa） |
+
+**输出：**
+- Markdown 报告：`reports/comprehensive_YYYYMMDD_HHMMSS.md`
+- JSON 报告：`reports/comprehensive_YYYYMMDD_HHMMSS.json`
+- 失败样本汇总：自动打印 `FailureStore` 统计
+
+**CLI 调用：**
+```bash
+# 全量评测
+python -m rag_framework.eval.comprehensive_eval all
+
+# 单项评测
+python -m rag_framework.eval.comprehensive_eval ranking
+python -m rag_framework.eval.comprehensive_eval rewrite --dataset domains/android/android_domain/eval/benchmark.json
+```
+
+---
+
 ## 4. 完整数据流
 
 ```mermaid
@@ -879,6 +1122,7 @@ curl -X POST http://localhost:8000/chat \
 
 | 版本 | 日期 | 变更内容 |
 |------|------|----------|
+| v3.3 | 2026-05-15 | **评测与可观测性体系**：`query_classifier.py` 自动分类 + 按类型统计 recall；`rewrite_eval.py` before/after 量化对比；`rerank_eval.py` CrossEncoder win/loss/hold 验证；`retrieval_trace.py` 检索全链路 Trace（已嵌入 `HybridRetriever`）；`latency_breakdown.py` PhaseTimer + 瓶颈自动识别；`failure_analysis.py` 失败样本收集 + JSON Lines 存储（已嵌入 `SessionManager`）；`comprehensive_eval.py` 一站式评测调度器；`eval/__init__.py` 统一导出 |
 | v3.1 | 2026-05-13 | **本地 Qwen 改写器**：新增 `QwenQueryRewriter`（Qwen2.5-1.5B-Instruct，懒加载，线程安全）；`container.py` 按 `rewriter_backend` 自动选择本地/远程改写器；`SessionManager._build_routes()` 加 Rewrite level 日志；`LLMQueryRewriter` / `RuleQueryRewriter` 加 model + 耗时 INFO 日志 |
 | v3.0 | 2026-05-13 | **三层架构重构**：rag_framework 独立包 + AndroidDomainPlugin + 薄应用层；删除 ai_app1 代理层；VectorIndexer 统一索引管道；RuleQueryRewriter / LLMQueryRewriter 提取为框架组件；FallbackReranker 独立组件；DenseStore 新增 get_or_create_collection；pytest 测试套件 |
 | v2.7 | 2026-05-12 | Rewrite Router 三级分流（L0/L1/L2）；低置信度兜底（top_ce<0.30）；Ollama 集成；LLM max_tokens 兼容修复；RERANK_TOP_K 5→3；`/debug/rewrite_cache` 监控 |

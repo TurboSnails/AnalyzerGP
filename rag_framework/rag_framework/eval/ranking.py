@@ -3,9 +3,12 @@
 
 与领域无关，通过 DomainPlugin 获取评测集，
 通过 Retriever 执行检索，输出 MRR / Hit@K / Recall@K / Latency 指标。
+
+增强：集成 Query 分类统计、Latency Breakdown。
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from pathlib import Path
@@ -23,6 +26,11 @@ from rag_framework.eval.metrics import (
     recall_at_k,
     reciprocal_rank,
 )
+from rag_framework.eval.query_classifier import (
+    aggregate_by_type,
+    classify_query_type_from_item,
+    format_type_stats,
+)
 from rag_framework.retrieval.base import RetrievedDoc
 from rag_framework.retrieval.fusion import HybridConfig
 
@@ -37,7 +45,7 @@ def load_dataset(path: Path) -> list[dict]:
 
 # ─── 单条 query 评测 ────────────────────────────────────────────────────────────
 
-def evaluate_single_query(
+async def evaluate_single_query(
     item: dict,
     container: RAGContainer,
     config: HybridConfig | None = None,
@@ -49,13 +57,18 @@ def evaluate_single_query(
     query = item["query"]
     cfg = config or HybridConfig()
 
+    # Query 分类
+    query_type = classify_query_type_from_item(item)
+
     # Query 扩写（可控开关）
     t_rewrite = 0.0
+    rewritten_query = query
     if enable_rewrite:
         t0 = time.perf_counter()
         route = container.domain.classify_query(query, [])
         queries = [route]
         t_rewrite = (time.perf_counter() - t0) * 1000
+        rewritten_query = route.text
     else:
         queries = [QueryRoute(text=query)]
 
@@ -63,7 +76,8 @@ def evaluate_single_query(
     old_cfg = container.retriever._cfg
     try:
         container.retriever._cfg = cfg
-        result = container.retriever.retrieve(queries)
+        # retrieve 是 async，直接 await
+        result = await container.retriever.retrieve(queries)
     finally:
         container.retriever._cfg = old_cfg
 
@@ -101,6 +115,8 @@ def evaluate_single_query(
 
     return {
         "query": query,
+        "query_type": query_type,
+        "rewritten_query": rewritten_query,
         "hit": h5 > 0,
         "rank": first_rank,
         "rr": round(rr, 4),
@@ -109,7 +125,7 @@ def evaluate_single_query(
         "hit@5": h5,
         "recall@5": r5,
         "latency_ms": round(total_latency, 2),
-        "latency_breakdown": {"rewrite": round(t_rewrite, 2), "total": round(total_latency, 2)},
+        "latency_breakdown": {"rewrite": round(t_rewrite, 2), "retrieval": round(result.latency_ms, 2), "total": round(total_latency, 2)},
         "matched_ids": list(gt_ids),
         "top_chunks": top_chunks,
     }
@@ -117,7 +133,7 @@ def evaluate_single_query(
 
 # ─── 批量评测 ───────────────────────────────────────────────────────────────────
 
-def run_ranking_eval(
+async def run_ranking_eval(
     dataset_path: Path | None = None,
     container: RAGContainer | None = None,
     config: HybridConfig | None = None,
@@ -162,7 +178,7 @@ def run_ranking_eval(
         print(f"{'─'*70}\n")
 
     for i, item in enumerate(dataset, 1):
-        res = evaluate_single_query(item, container, config=config, enable_rewrite=enable_rewrite)
+        res = await evaluate_single_query(item, container, config=config, enable_rewrite=enable_rewrite)
 
         rank_lists.append([c["id"] for c in res["top_chunks"]])
         ground_truths.append(set(res["matched_ids"]))
@@ -171,7 +187,7 @@ def run_ranking_eval(
 
         if verbose:
             rank_str = f"rank={res['rank']}" if res["hit"] else "rank=MISS"
-            print(f"[{i:02d}/{total}] {'✅' if res['hit'] else '❌'} {rank_str:12s}  ({res['latency_ms']:.0f}ms)")
+            print(f"[{i:02d}/{total}] {'✅' if res['hit'] else '❌'} {rank_str:12s}  ({res['latency_ms']:.0f}ms)  type={res['query_type']}")
             print(f"  Query : {res['query'][:65]}")
             for tc in res["top_chunks"][:3]:
                 marker = "  **" if tc["is_hit"] else "    "
@@ -196,6 +212,11 @@ def run_ranking_eval(
         latencies_ms=latencies,
         config_summary=config_summary,
     )
+
+    # Query 分类统计
+    type_stats = aggregate_by_type(details)
+    if verbose:
+        print(format_type_stats(type_stats))
 
     if verbose:
         print(f"{'─'*70}")

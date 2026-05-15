@@ -24,6 +24,9 @@ from rag_framework.retrieval.base import Retriever, RetrievalResult, RetrievedDo
 from rag_framework.rerank.base import Reranker, RankedDoc
 
 if TYPE_CHECKING:
+    from rag_framework.eval.failure_analysis import FailureCollector
+
+if TYPE_CHECKING:
     from rag_framework.embedding.base import Embedder
     from rag_framework.retrieval.sparse import BM25Store
 
@@ -85,7 +88,18 @@ class HybridRetriever(Retriever):
         query: str | QueryRoute | list[QueryRoute],
         top_k: int = 10,
     ) -> RetrievalResult:
+        # Lazy imports to break circular dependency with rag_framework.eval package
+        from rag_framework.eval.latency_breakdown import PhaseTimer
+        from rag_framework.eval.retrieval_trace import (
+            BranchTrace,
+            RerankTrace,
+            RetrievalTrace,
+            record_trace,
+        )
+
         t0 = time.perf_counter()
+        timer = PhaseTimer()
+        trace = RetrievalTrace()
 
         # 输入归一化
         if isinstance(query, str):
@@ -99,6 +113,9 @@ class HybridRetriever(Retriever):
             return RetrievalResult(docs=[], latency_ms=0.0)
 
         original_query = queries[0].text
+        trace.original_query = original_query
+        trace.query = original_query
+
         collections = self._domain.get_collection_names()
 
         # 检查 v2 collections
@@ -113,17 +130,26 @@ class HybridRetriever(Retriever):
 
         # ── 多路异步并发召回 ────────────────────────────────────────────────────
         t1 = time.perf_counter()
-        weighted_lists, pid_best_dense, pid_best_bm25 = await self._async_multi_route_fetch(
-            queries, collections
+        weighted_lists, pid_best_dense, pid_best_bm25, branch_traces = await self._async_multi_route_fetch(
+            queries, collections, trace
         )
         t_fetch = time.perf_counter() - t1
+        timer.record("fetch", t_fetch * 1000)
+        trace.branches = branch_traces
 
         # ── Weighted RRF 融合 ───────────────────────────────────────────────────
+        t_rrf_start = time.perf_counter()
         rrf_results  = self._rrf_merge(weighted_lists)
         rrf_score_map = {pid: score for pid, score in rrf_results}
         top20_ids    = [pid for pid, _ in rrf_results[:20]]
+        t_rrf = (time.perf_counter() - t_rrf_start) * 1000
+        timer.record("rrf", t_rrf)
+        trace.rrf_latency_ms = t_rrf
+        trace.rrf_input_count = len(weighted_lists)
+        trace.rrf_output_count = len(rrf_results)
 
         # ── 拉取 parent 文本（to_thread，避免阻塞 event loop）────────────────────
+        t_fetch_parent_start = time.perf_counter()
         try:
             parent_texts = await asyncio.wait_for(
                 asyncio.to_thread(self._dense.fetch_parents, top20_ids, collections.parent),
@@ -131,7 +157,11 @@ class HybridRetriever(Retriever):
             )
         except asyncio.TimeoutError:
             retrieval_logger.warning("fetch_parents 超时，返回空结果")
-            return RetrievalResult(docs=[], latency_ms=(time.perf_counter() - t0) * 1000)
+            total_ms = (time.perf_counter() - t0) * 1000
+            trace.final_latency_ms = total_ms
+            record_trace(trace)
+            return RetrievalResult(docs=[], latency_ms=total_ms)
+        timer.record("fetch_parents", (time.perf_counter() - t_fetch_parent_start) * 1000)
 
         # ── 构建候选列表 ─────────────────────────────────────────────────────────
         seen: set[str] = set()
@@ -148,9 +178,14 @@ class HybridRetriever(Retriever):
                 ))
 
         if not candidates:
-            return RetrievalResult(docs=[], latency_ms=(time.perf_counter() - t0) * 1000)
+            total_ms = (time.perf_counter() - t0) * 1000
+            trace.final_latency_ms = total_ms
+            record_trace(trace)
+            return RetrievalResult(docs=[], latency_ms=total_ms)
 
         # ── Rerank（CrossEncoder，to_thread + timeout）───────────────────────────
+        t_rerank_start = time.perf_counter()
+        rerank_trace = RerankTrace()
         if self._cfg.enable_rerank:
             try:
                 reranked = await asyncio.wait_for(
@@ -162,8 +197,11 @@ class HybridRetriever(Retriever):
                     ),
                     timeout=self._cfg.rerank_timeout,
                 )
+                rerank_trace.status = "success"
             except asyncio.TimeoutError:
                 retrieval_logger.warning(f"Rerank 超时（>{self._cfg.rerank_timeout}s），降级 RRF 排序")
+                rerank_trace.status = "timeout"
+                rerank_trace.error = "timeout"
                 for c in candidates:
                     c.score = c.rrf_score
                     c.ce_score = 0.0
@@ -176,11 +214,19 @@ class HybridRetriever(Retriever):
             reranked = sorted(candidates, key=lambda x: x.score, reverse=True)[
                 : self._cfg.rerank_top_k
             ]
-
+            rerank_trace.status = "skipped"
+        t_rerank = (time.perf_counter() - t_rerank_start) * 1000
+        timer.record("rerank", t_rerank)
+        rerank_trace.latency_ms = t_rerank
+        rerank_trace.input_count = len(candidates)
+        rerank_trace.output_count = len(reranked)
         top_ce = float(reranked[0].ce_score) if reranked else 0.0
+        rerank_trace.top_ce_score = top_ce
+        trace.rerank = rerank_trace
 
         # ── Lost-in-Middle 重排 ──────────────────────────────────────────────────
         ordered = self._lost_in_middle(reranked) if self._cfg.enable_lost_in_middle else reranked
+        trace.lost_in_middle = self._cfg.enable_lost_in_middle
 
         docs = [
             RetrievedDoc(
@@ -199,16 +245,23 @@ class HybridRetriever(Retriever):
         ]
 
         total_ms = (time.perf_counter() - t0) * 1000
+        trace.final_latency_ms = total_ms
+        trace.final_chunk_count = len(docs)
+        trace.final_top_ids = [d.id for d in docs]
+        trace.top_ce_score = top_ce
+
         retrieval_logger.info(
             f"HybridRetriever: {len(docs)} 个片段, top_ce={top_ce:.3f}, "
             f"fetch={t_fetch*1000:.0f}ms, total={total_ms:.0f}ms"
         )
+        retrieval_logger.info(trace.print_trace())
+        record_trace(trace)
 
         return RetrievalResult(
             docs=docs,
             query=original_query,
             latency_ms=total_ms,
-            metadata={"top_ce": top_ce, "n_chunks": len(docs)},
+            metadata={"top_ce": top_ce, "n_chunks": len(docs), "trace": trace.to_dict()},
         )
 
     # ─── 异步并发多路召回 ────────────────────────────────────────────────────────
@@ -217,11 +270,15 @@ class HybridRetriever(Retriever):
         self,
         queries: list[QueryRoute],
         collections,
-    ) -> tuple[list[tuple[list[str], float]], dict[str, int], dict[str, int]]:
+        trace: RetrievalTrace | None = None,
+    ) -> tuple[list[tuple[list[str], float]], dict[str, int], dict[str, int], list[BranchTrace]]:
         """
         用 asyncio.gather 并发执行所有检索分支，每路独立 timeout。
         各分支在线程池中运行（to_thread），不阻塞事件循环。
+        返回分支 trace 列表用于 observability。
         """
+        # Lazy import to break circular dependency with rag_framework.eval package
+        from rag_framework.eval.retrieval_trace import BranchTrace
         task_meta: list[tuple[str, float]] = []   # (kind, weight)
         coros: list = []
 
@@ -248,15 +305,22 @@ class HybridRetriever(Retriever):
                 task_meta.append(("bm25", q.weight))
 
         # 并发执行，单路超时不中断其他路
+        t_start = time.perf_counter()
         results = await asyncio.gather(*coros, return_exceptions=True)
+        total_fetch_ms = (time.perf_counter() - t_start) * 1000
 
         weighted_lists: list[tuple[list[str], float]] = []
         pid_best_dense: dict[str, int] = {}
         pid_best_bm25: dict[str, int] = {}
+        branch_traces: list[BranchTrace] = []
 
         for (kind, weight), result in zip(task_meta, results):
+            bt = BranchTrace(kind=kind, query_text=queries[0].text, weight=weight)
             if isinstance(result, (Exception, asyncio.TimeoutError)):
                 retrieval_logger.warning(f"{kind} 分支失败/超时: {result!r}")
+                bt.status = "timeout" if isinstance(result, asyncio.TimeoutError) else "error"
+                bt.error = str(result)
+                branch_traces.append(bt)
                 continue
 
             if kind == "bm25":
@@ -268,9 +332,15 @@ class HybridRetriever(Retriever):
                 for rank, pid in enumerate(pids):
                     pid_best_dense[pid] = min(pid_best_dense.get(pid, 999), rank)
 
+            bt.status = "success"
+            bt.result_count = len(pids)
+            bt.top_ids = pids[:5]
+            # 均摊总耗时（近似），更精确需逐个计时
+            bt.latency_ms = total_fetch_ms / len(task_meta) if task_meta else 0.0
+            branch_traces.append(bt)
             weighted_lists.append((pids, weight))
 
-        return weighted_lists, pid_best_dense, pid_best_bm25
+        return weighted_lists, pid_best_dense, pid_best_bm25, branch_traces
 
     # ─── 同步子步骤（在线程中运行）────────────────────────────────────────────────
 

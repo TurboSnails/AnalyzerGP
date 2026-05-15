@@ -131,7 +131,7 @@ class RAGContainer:
         if _domain_override is not None:
             domain = _domain_override
         else:
-            # 兼容旧逻辑：若未注册则尝试自动发现
+            # 兼容旧逻辑：若未注册则尝试自动发现并注册
             if settings.active_domain not in list_domains():
                 try:
                     import importlib
@@ -144,7 +144,20 @@ class RAGContainer:
                         pkg_path = str(domain_pkg)
                         if pkg_path not in sys.path:
                             sys.path.insert(0, pkg_path)
-                    importlib.import_module(f"{settings.active_domain}_domain")
+                    mod = importlib.import_module(f"{settings.active_domain}_domain")
+                    # 自动查找并注册 DomainPlugin 子类
+                    from rag_framework.core.registry import register_domain
+                    from rag_framework.domain.base import DomainPlugin
+
+                    for attr_name in dir(mod):
+                        attr = getattr(mod, attr_name)
+                        if (
+                            isinstance(attr, type)
+                            and issubclass(attr, DomainPlugin)
+                            and attr is not DomainPlugin
+                        ):
+                            register_domain(attr)
+                            break
                 except Exception:
                     pass
             domain = get_domain(settings.active_domain)

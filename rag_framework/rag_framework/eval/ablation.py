@@ -42,7 +42,7 @@ def _ablation_configs() -> list[tuple[str, HybridConfig]]:
 
 # ─── 单实验运行 ─────────────────────────────────────────────────────────────────
 
-def run_single_experiment(
+async def run_single_experiment(
     name: str,
     config: HybridConfig,
     container: RAGContainer | None = None,
@@ -50,7 +50,7 @@ def run_single_experiment(
     enable_rewrite: bool = True,
     verbose: bool = False,
 ) -> EvalMetrics:
-    return run_ranking_eval(
+    return await run_ranking_eval(
         dataset_path=dataset_path,
         container=container,
         config=config,
@@ -61,7 +61,7 @@ def run_single_experiment(
 
 # ─── 批量消融实验 ───────────────────────────────────────────────────────────────
 
-def run_ablation_study(
+async def run_ablation_study(
     dataset_path: Path | None = None,
     container: RAGContainer | None = None,
     output_dir: Path | None = None,
@@ -88,7 +88,7 @@ def run_ablation_study(
         summary = f"{name} ({cfg.enable_hyde=}, {cfg.enable_bm25=}, {cfg.enable_rerank=}, {cfg.enable_lost_in_middle=})"
         print(f"▶ 运行实验: {name}  ...  ({summary})")
         t0 = time.perf_counter()
-        metrics = run_single_experiment(
+        metrics = await run_single_experiment(
             name=name,
             config=cfg,
             container=container,

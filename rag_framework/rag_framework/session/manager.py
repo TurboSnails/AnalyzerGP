@@ -2,6 +2,7 @@
 Session Manager — 会话生命周期 + 消息构建 + 摘要管理
 
 替代原 session.py 中的过程式函数，面向对象封装。
+集成 FailureCollector，自动收集低置信度和未命中样本。
 """
 from __future__ import annotations
 
@@ -133,6 +134,8 @@ class SessionManager:
 
         顺序：system → summary → history → [token 预警] → retrieved context
         retrieve() 为 async，在此 await 不阻塞事件循环。
+
+        集成 FailureCollector：自动收集低置信度和未命中样本。
         """
         messages = self._build_raw_messages(session)
 
@@ -143,7 +146,9 @@ class SessionManager:
             })
 
         # 1. 分级 rewrite + classify → 多路 QueryRoute
+        t_rewrite_start = time.perf_counter()
         routes = self._build_routes(req_msg, session.history)
+        t_rewrite = (time.perf_counter() - t_rewrite_start) * 1000
         session_logger.info(f"检索路由: routes={[r.type for r in routes]}")
 
         # 2. 异步多路检索
@@ -153,21 +158,40 @@ class SessionManager:
         n_chunks = len(result.docs)
         threshold = self._settings.low_confidence_threshold
 
-        if context and top_ce >= threshold:
-            messages.append({"role": "user", "content": f"参考资料：{context}"})
-            session_logger.info(f"追加参考资料 ({n_chunks} 片段, top_ce={top_ce:.3f})")
-        elif context and top_ce < threshold:
+        # ── Failure Analysis 收集 ─────────────────────────────────────────────
+        from rag_framework.eval.failure_analysis import get_failure_collector
+        collector = get_failure_collector()
+        trace_dict = result.metadata.get("trace", {})
+        trace_dict["rewrite_latency_ms"] = t_rewrite
+
+        if not result.docs:
+            # 未检索到任何文档
+            collector.collect_miss(
+                query=req_msg,
+                trace=trace_dict,
+                session_id=session.user_id,
+            )
+            session_logger.warning("未检索到任何文档")
+            messages.append({
+                "role": "user",
+                "content": self._domain.fallback_response("no_results")
+            })
+        elif top_ce < threshold:
+            # 低置信度
+            collector.collect_low_ce(
+                query=req_msg,
+                top_ce=top_ce,
+                trace=trace_dict,
+                session_id=session.user_id,
+            )
             session_logger.warning(f"低置信度检索 (top_ce={top_ce:.3f})，触发拒答")
             messages.append({
                 "role": "user",
                 "content": self._domain.fallback_response("low_confidence")
             })
         else:
-            session_logger.warning("未检索到任何文档")
-            messages.append({
-                "role": "user",
-                "content": self._domain.fallback_response("no_results")
-            })
+            messages.append({"role": "user", "content": f"参考资料：{context}"})
+            session_logger.info(f"追加参考资料 ({n_chunks} 片段, top_ce={top_ce:.3f})")
 
         return messages
 
