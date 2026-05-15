@@ -15,6 +15,8 @@ import warnings
 import chromadb
 import tantivy
 
+from rag_framework.core.factories import register_vector_store
+
 logger = logging.getLogger("bm25_store")
 
 with warnings.catch_warnings():
@@ -167,3 +169,14 @@ class BM25Store:
 
         logger.info("Tantivy BM25 索引已清空，重新构建中...")
         self._ensure_loaded()
+
+
+# ─── 工厂函数与自注册 ──────────────────────────────────────────
+def _create_bm25_store(
+    index_dir: str,
+    chroma_path: str,
+) -> BM25Store:
+    return BM25Store(index_dir=index_dir, chroma_path=chroma_path)
+
+
+register_vector_store("bm25", _create_bm25_store)

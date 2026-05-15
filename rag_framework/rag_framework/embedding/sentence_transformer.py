@@ -13,6 +13,8 @@ import torch
 from sentence_transformers import SentenceTransformer
 
 from rag_framework.core.exceptions import ModelLoadError, ModelNotFoundError
+from rag_framework.core.factories import register_embedder
+from rag_framework.core.lifecycle import Warmupable
 from rag_framework.core.logger import embed_logger
 from rag_framework.embedding.base import Embedder
 
@@ -28,7 +30,7 @@ def _resolve_device(requested: str) -> str:
     return "cpu"
 
 
-class STEmbedder(Embedder):
+class STEmbedder(Embedder, Warmupable):
     """基于 SentenceTransformer 的 Embedder。"""
 
     def __init__(
@@ -94,3 +96,26 @@ class STEmbedder(Embedder):
                 )
                 out.extend(embeddings.tolist())
             return out
+
+    async def warmup(self) -> None:
+        """异步预热：将模型加载卸载到线程池。"""
+        import asyncio
+        await asyncio.to_thread(self._ensure_model)
+
+
+# ─── 工厂函数与自注册 ──────────────────────────────────────────
+
+def _create_st_embedder(
+    model_path: str | None = None,
+    device: str = "auto",
+    normalize: bool = True,
+) -> STEmbedder:
+    """Factory：处理默认值后创建 STEmbedder 实例。"""
+    # 延迟导入避免循环依赖；Phase 2 会将路径解析完全移出 config
+    from rag_framework.core.config import _resolve_bge_m3_path
+    path = model_path or _resolve_bge_m3_path()
+    return STEmbedder(model_path=path, device=device, normalize=normalize)
+
+
+register_embedder("sentence_transformer", _create_st_embedder)
+register_embedder("st", _create_st_embedder)

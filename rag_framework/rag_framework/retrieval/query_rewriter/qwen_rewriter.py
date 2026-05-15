@@ -11,6 +11,8 @@ import re
 import threading
 import time
 
+from rag_framework.core.factories import register_rewriter
+from rag_framework.core.lifecycle import Warmupable
 from rag_framework.core.logger import get_logger
 from rag_framework.domain.base import QueryRoute
 from rag_framework.retrieval.query_rewriter.base import QueryRewriter
@@ -26,7 +28,7 @@ _SYSTEM_PROMPT = (
 )
 
 
-class QwenQueryRewriter(QueryRewriter):
+class QwenQueryRewriter(QueryRewriter, Warmupable):
     """
     本地 Qwen2.5-1.5B-Instruct 查询改写器。
 
@@ -190,3 +192,22 @@ class QwenQueryRewriter(QueryRewriter):
             if ln:
                 lines.append(ln)
         return lines
+
+    async def warmup(self) -> None:
+        """异步预热：加载 Qwen 模型。"""
+        import asyncio
+        await asyncio.to_thread(self._ensure_loaded)
+
+
+# ─── 工厂函数与自注册 ──────────────────────────────────────────
+def _create_qwen_rewriter(
+    model_path: str = "",
+    max_new_tokens: int = 128,
+) -> QwenQueryRewriter:
+    from rag_framework.core.config import _resolve_rewriter_path
+    path = model_path or _resolve_rewriter_path()
+    return QwenQueryRewriter(model_path=path, max_new_tokens=max_new_tokens)
+
+
+register_rewriter("qwen", _create_qwen_rewriter)
+register_rewriter("local_rewriter", _create_qwen_rewriter)

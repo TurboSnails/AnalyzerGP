@@ -37,3 +37,17 @@ from rag_framework.rerank.base import Reranker
 from rag_framework.llm.base import LLMClient
 from rag_framework.retrieval.base import Retriever
 from rag_framework.session.base import SessionStore
+
+# ── 触发所有实现类的自注册 ──────────────────────────────────────────
+# 以下导入不直接使用符号，但会执行模块底部的 register_xxx() 调用，
+# 将各后端实现注册到全局工厂注册表中。
+from rag_framework.embedding import sentence_transformer  # noqa: F401
+from rag_framework.retrieval import dense, sparse, fusion  # noqa: F401
+from rag_framework.llm import local_client, openai_client  # noqa: F401
+from rag_framework.rerank import cross_encoder  # noqa: F401
+from rag_framework.session import memory_store  # noqa: F401
+from rag_framework.retrieval.query_rewriter import (  # noqa: F401
+    rule_rewriter,
+    llm_rewriter,
+    qwen_rewriter,
+)

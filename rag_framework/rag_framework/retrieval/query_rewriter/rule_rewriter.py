@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import time
 
+from rag_framework.core.factories import register_rewriter
 from rag_framework.core.logger import get_logger
 from rag_framework.domain.base import DomainPlugin, QueryRoute
 from rag_framework.retrieval.query_rewriter.base import QueryRewriter
@@ -47,3 +48,11 @@ class RuleQueryRewriter(QueryRewriter):
                 routes=["bm25", "dense"],
             ),
         ]
+
+
+# ─── 工厂函数与自注册 ──────────────────────────────────────────
+def _create_rule_rewriter(domain: DomainPlugin) -> RuleQueryRewriter:
+    return RuleQueryRewriter(domain=domain)
+
+
+register_rewriter("rule", _create_rule_rewriter)

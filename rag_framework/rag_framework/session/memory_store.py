@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import threading
 
+from rag_framework.core.factories import register_session_store
 from rag_framework.core.logger import session_logger
 from rag_framework.session.base import SessionStore, SessionData
 
@@ -45,3 +46,13 @@ class MemorySessionStore(SessionStore):
     def list_users(self) -> list[str]:
         with self._lock:
             return list(self._data.keys())
+
+
+# ─── 工厂函数与自注册 ──────────────────────────────────────────
+def _create_memory_session_store(
+    default_budget: int = 4096,
+) -> MemorySessionStore:
+    return MemorySessionStore(default_budget=default_budget)
+
+
+register_session_store("memory", _create_memory_session_store)

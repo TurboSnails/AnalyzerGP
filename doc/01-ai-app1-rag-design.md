@@ -1,14 +1,14 @@
 # ai_app1 - Android RAG 问答系统设计文档
 
-> 版本: 3.1 | 最后更新: 2026-05-13
+> 版本: 3.2 | 最后更新: 2026-05-15
 
 ---
 
 ## 1. 系统定位
 
-ai_app1 是一个面向 Android 开发者的 **智能问答助手**，基于 RAG (Retrieval-Augmented Generation) 架构构建。系统将《Android 开发核心注意事项与避坑指南》作为知识源，通过多路混合检索为 MiniMax-M2.7 大模型提供精准上下文，回答 Android 开发中的各类技术问题。
+ai_app1 是一个面向 Android 开发者的 **智能问答助手**，基于 RAG (Retrieval-Augmented Generation) 架构构建。系统将《Android 开发核心注意事项与避坑指南》作为知识源，通过多路混合检索为本地 Qwen2.5 或远程 MiniMax-M2.7 等大模型提供精准上下文，回答 Android 开发中的各类技术问题。
 
-**v3.0 核心变化**：完成从单体 ai_app1 到三层架构的迁移。原 ai_app1 内的 service/core/retrieval/eval 代理层已全部删除，业务逻辑下沉至可复用的 `rag_framework` 包，ai_app1 保留为仅负责 HTTP 路由的薄应用层。
+**v3.2 核心变化**：引入工厂注册表（`rag_framework/core/factories.py`）+ 生命周期协议（`Warmupable`/`Closable`），实现组件热插拔；`RAGContainer` 改为不可变 dataclass；移除所有 import-time 副作用，领域插件改为 lifespan 显式注册；API 层零全局状态，通过 FastAPI `Depends` 注入容器。
 
 ---
 
@@ -18,7 +18,7 @@ ai_app1 是一个面向 Android 开发者的 **智能问答助手**，基于 RAG
 ┌─────────────────────────────────────────────────────────┐
 │            应用层 (ai_app1/)                              │
 │   main.py + api/chat.py  →  FastAPI HTTP 路由            │
-│   职责：启动预热、HTTP 接入、RAGContainer 依赖注入         │
+│   职责：lifespan 显式注册领域、容器组装、协议化预热/关闭     │
 └─────────────────────────┬───────────────────────────────┘
                           │  import rag_framework
                           ▼
@@ -26,15 +26,17 @@ ai_app1 是一个面向 Android 开发者的 **智能问答助手**，基于 RAG
 │          领域插件层 (domains/android/)                     │
 │   AndroidDomainPlugin  →  Android 领域知识的策略集合       │
 │   职责：集合命名、术语词典、查询路由规则、HyDE Prompt        │
+│   特点：import-time 零副作用，由 lifespan 显式注册           │
 └─────────────────────────┬───────────────────────────────┘
                           │  implement DomainPlugin
                           ▼
 ┌─────────────────────────────────────────────────────────┐
 │        框架层 (rag_framework/ — 可安装 Python 包)          │
-│   RAGContainer · SessionManager · HybridRetriever       │
+│   RAGContainer(frozen) · SessionManager · HybridRetriever│
 │   VectorIndexer · STEmbedder · CrossEncoderReranker     │
-│   QueryRewriter · OpenAILLMClient · DenseStore          │
-│   职责：通用 RAG 管道的所有实现细节                        │
+│   QueryRewriter · OpenAILLMClient / LocalLLMClient      │
+│   ChromaVectorStore · BM25Store · Factories / Lifecycle │
+│   职责：通用 RAG 管道 + 可插拔组件注册表 + 生命周期协议      │
 └─────────────────────────────────────────────────────────┘
 ```
 
@@ -44,27 +46,33 @@ ai_app1 是一个面向 Android 开发者的 **智能问答助手**，基于 RAG
 fenxiCB/
 ├── rag_framework/                  # 框架包源码
 │   └── rag_framework/
-│       ├── container.py            # RAGContainer — 依赖注入总控
-│       ├── core/                   # config / logger / registry / exceptions
+│       ├── container.py            # RAGContainer — 不可变依赖注入总控
+│       ├── core/
+│       │   ├── config.py           # RAGSettings（纯配置，去路径化）
+│       │   ├── factories.py        # 组件工厂注册表（热插拔）
+│       │   ├── lifecycle.py        # Warmupable / Closable 协议
+│       │   ├── registry.py         # 领域插件注册表
+│       │   ├── logger.py           # 结构化日志
+│       │   └── exceptions.py       # 异常基类
 │       ├── domain/base.py          # DomainPlugin 抽象基类
-│       ├── embedding/              # STEmbedder (SentenceTransformer)
+│       ├── embedding/              # STEmbedder + 自注册工厂
 │       ├── indexing/               # VectorIndexer / chunker / hyde
-│       ├── llm/                    # OpenAILLMClient / tool_registry
+│       ├── llm/                    # OpenAILLMClient / LocalLLMClient / tool_registry
 │       ├── rerank/                 # CrossEncoderReranker / FallbackReranker
-│       ├── retrieval/              # DenseStore / HybridRetriever / sparse
-│       │   └── query_rewriter/     # RuleQueryRewriter / LLMQueryRewriter / QwenQueryRewriter
+│       ├── retrieval/              # ChromaVectorStore / HybridRetriever / BM25Store
+│       │   └── query_rewriter/     # Rule / LLM / Qwen Rewriter
 │       ├── session/                # SessionManager / memory_store
 │       └── eval/                   # 评测框架
 ├── domains/android/
-│   ├── android_domain/plugin.py    # AndroidDomainPlugin 实现
+│   ├── android_domain/plugin.py    # AndroidDomainPlugin（无 import-time 注册）
 │   └── scripts/
-│       ├── init_vector_db_v2.py    # 生产索引脚本 (使用 VectorIndexer)
-│       └── init_vector_db.py       # V1 轻量验证脚本 (已废弃)
+│       ├── init_vector_db_v2.py    # 生产索引脚本
+│       └── init_vector_db.py       # V1（已废弃）
 ├── ai_app1/                        # 薄应用层
-│   ├── main.py                     # FastAPI app + 启动预热
-│   ├── api/chat.py                 # /chat 路由 + RAGContainer 注入
+│   ├── main.py                     # FastAPI app + lifespan（协议化预热）
+│   ├── api/chat.py                 # /chat 路由 + Depends 注入容器
 │   ├── scripts/                    # 模型下载辅助脚本
-│   └── tests/test_api.py           # API 端到端测试
+│   └── tests/test_api.py           # API 端到端测试（直接注入 mock 容器）
 └── doc/
 ```
 
@@ -74,68 +82,83 @@ fenxiCB/
 
 ### 3.1 依赖注入容器 (RAGContainer)
 
-`rag_framework/container.py` 是系统的组装中心，通过 `from_settings()` 工厂方法一次性创建所有组件：
+`rag_framework/container.py` 是系统的组装中心。`RAGContainer` 为 **不可变 frozen dataclass**，通过工厂注册表创建所有组件，实现热插拔：
 
 ```python
-@dataclass
+@dataclass(frozen=True, slots=True)
 class RAGContainer:
-    embedder:      STEmbedder            # BGE-M3 向量编码
-    dense_store:   DenseStore            # ChromaDB 持久化存储
-    sparse_store:  BM25Store             # Tantivy 磁盘 BM25 索引
-    retriever:     HybridRetriever       # 多路召回 + RRF 融合
-    reranker:      CrossEncoderReranker  # 语义精排
-    llm:           OpenAILLMClient       # MiniMax / OpenAI / Ollama
-    session_store: MemorySessionStore    # 会话状态 (内存)
-    domain:        DomainPlugin          # Android 领域插件
+    settings:        RAGSettings
+    embedder:        Embedder              # BGE-M3 向量编码
+    vector_store:    VectorStore           # ChromaDB（统一抽象接口）
+    retriever:       Retriever             # HybridRetriever（多路召回 + RRF）
+    reranker:        Reranker              # CrossEncoderReranker 语义精排
+    llm:             LLMClient             # OpenAILLMClient / LocalLLMClient
+    session_store:   SessionStore          # MemorySessionStore
+    domain:          DomainPlugin          # Android 领域插件
+    rule_rewriter:   QueryRewriter | None  # L1 规则改写器
+    llm_rewriter:    QueryRewriter | None  # L2 LLM 改写器
 
     @classmethod
-    def from_settings(cls, settings: RAGSettings) -> "RAGContainer": ...
+    def from_settings(cls, settings: RAGSettings | None = None) -> "RAGContainer":
+        # 1. 通过 embedder_registry.create("sentence_transformer", ...) 创建组件
+        # 2. 通过 vector_store_registry.create("chroma", ...) 创建向量库
+        # 3. 通过 llm_registry.create("local" | "openai" | "minimax", ...) 创建 LLM
+        # ... 所有组件均通过注册表创建，无硬编码 new
+        ...
 
-    async def chat_stream(self, query: str, user_id: str) -> AsyncGenerator[str, None]:
-        # 委托给 SessionManager，async generator 逐 token yield
-        manager = SessionManager(self)
+    async def chat_stream(self, query: str, user_id: str):
+        manager = SessionManager(...)
         async for chunk in manager.chat_stream(query, user_id):
             yield chunk
+
+    def warmup_targets(self) -> list[Warmupable]:
+        """返回所有支持预热的组件，供 lifespan 统一调用。"""
+        return [comp for comp in (... ) if isinstance(comp, Warmupable)]
 ```
 
-**ai_app1/api/chat.py** 使用 FastAPI Depends 模式注入：
+**ai_app1/api/chat.py** 使用 FastAPI `Depends` 从 `app.state` 注入容器，零全局状态：
 
 ```python
-_container: RAGContainer | None = None
-
-def get_container() -> RAGContainer:
-    global _container
-    if _container is None:
-        _container = RAGContainer.from_settings(get_settings())
-    return _container
+def get_container(request: Request) -> RAGContainer:
+    container = getattr(request.app.state, "container", None)
+    if container is None:
+        raise RuntimeError("RAGContainer 未初始化，请检查 lifespan 是否已执行")
+    return container
 
 @router.post("/chat")
 async def chat(req: ChatRequest, container: RAGContainer = Depends(get_container)):
     async def content_generator():
         async for chunk in container.chat_stream(req.message, req.user_id):
             yield chunk
-    return StreamingResponse(content_generator(), media_type="text/plain")
+    return StreamingResponse(content_generator(), media_type="text/event-stream")
 ```
 
 ---
 
 ### 3.2 配置系统 (RAGSettings)
 
-`rag_framework/core/config.py` 基于 Pydantic BaseSettings，环境变量前缀 `RAG_`：
+`rag_framework/core/config.py` 基于 Pydantic BaseSettings，环境变量前缀 `RAG_`。
+
+**v3.2 变化**：配置类精简为纯配置，路径解析函数保留但移至工厂函数中作为默认策略，不直接耦合在 `RAGSettings` 的构建流程里。
 
 | 配置项 | 默认值 | 说明 |
 |--------|--------|------|
-| `llm_backend` | `"minimax"` | 支持 `minimax` / `openai` / `ollama` |
-| `llm_base_url` | 按 backend 预设 | minimax: `https://api.minimaxi.com/v1` |
-| `llm_model` | 按 backend 预设 | minimax: `MiniMax-M2.7` |
+| `llm_backend` | `"local"` | 支持 `local` / `minimax` / `openai` / `ollama` |
+| `llm_base_url` | 按 backend 预设 | `local` 为空串；minimax / openai / ollama 自动填充 |
+| `llm_model` | 按 backend 预设 | local: `qwen2.5-1.5b-instruct`；minimax: `MiniMax-M2.7` |
 | `llm_api_key` | 回退链解析 | 配置值 → `OPENAI_API_KEY` 环境变量 → backend 默认 |
-| `chroma_db_path` | 动态解析 | 先查 `ai_app1/data/chroma_db`（兼容旧路径），否则用 `pre/chroma_db` |
+| `llm_max_tokens` | `512` | LLM 最大生成 token 数 |
+| `llm_max_concurrent` | `3` | LLM 并发请求限制 |
+| `embed_backend` | `"sentence_transformer"` | 通过工厂注册表选择 embedder 实现 |
+| `vector_store_backend` | `"chroma"` | 通过工厂注册表选择向量库实现 |
+| `reranker_backend` | `"cross_encoder"` | 通过工厂注册表选择 reranker 实现 |
+| `retriever_backend` | `"hybrid"` | 通过工厂注册表选择检索器实现 |
+| `session_store_backend` | `"memory"` | 通过工厂注册表选择会话存储实现 |
+| `chroma_db_path` | 动态解析 | 优先 `ai_app1/data/chroma_db`，否则 `pre/chroma_db` |
 | `bm25_path` | 依 chroma 父目录 | `<chroma_parent>/tantivy_bm25/` |
-| `bge_m3_path` | 动态解析 | 查 `models/bge-m3/` 含权重目录 |
-| `reranker_model` | 动态解析 | 本地 `models/bge-reranker-base/` 或 HF Hub |
-| `rewriter_backend` | `"auto"` | `auto`=本地优先（路径存在则用 Qwen，否则 MiniMax）；`local`=强制本地；`ollama`=Ollama |
-| `rewriter_model` | 动态解析 | 本地 `models/qwen2.5-1.5b-instruct/`（`_resolve_rewriter_path()` 自动查找） |
-| `rewriter_max_tokens` | `128` | 改写器最大输出 token 数 |
+| `embed_model_path` | 动态解析 | `models/bge-m3/` 含权重目录 |
+| `reranker_model_path` | 动态解析 | 本地 `models/bge-reranker-base/` 或 HF Hub |
+| `llm_local_model_path` | 动态解析 | `models/qwen2.5-1.5b-instruct/` |
 
 配置加载顺序：`.env` → `ai_app1/.env`（`override=False`，不覆盖已有环境变量）。
 
@@ -143,13 +166,54 @@ async def chat(req: ChatRequest, container: RAGContainer = Depends(get_container
 
 | backend | base_url | model |
 |---------|----------|-------|
+| `local` | `''` | `qwen2.5-1.5b-instruct` |
 | `minimax` | `https://api.minimaxi.com/v1` | `MiniMax-M2.7` |
 | `openai` | `https://api.openai.com/v1` | `gpt-4o-mini` |
 | `ollama` | `http://127.0.0.1:11434/v1` | `qwen2.5:1.5b-instruct-q4_K_M` |
 
 ---
 
-### 3.3 领域插件系统 (DomainPlugin)
+### 3.3 工厂注册表 (Component Factories)
+
+`rag_framework/core/factories.py` 实现泛型组件注册表，每个组件类型独立管理：
+
+```python
+# 全局注册表实例
+embedder_registry     = _Registry[Any]("embedder")
+vector_store_registry = _Registry[Any]("vector_store")
+llm_registry          = _Registry[Any]("llm")
+reranker_registry     = _Registry[Any]("reranker")
+session_store_registry = _Registry[Any]("session_store")
+rewriter_registry     = _Registry[Any]("rewriter")
+retriever_registry    = _Registry[Any]("retriever")
+```
+
+各实现类在模块底部通过 `register_xxx()` 自注册，例如 `LocalLLMClient`：
+
+```python
+def _create_local_llm(model_path: str = "", ...):
+    return LocalLLMClient(model_path=model_path, device="cpu", dtype="float32", ...)
+
+register_llm("local", _create_local_llm)
+```
+
+**生命周期协议**（`rag_framework/core/lifecycle.py`）：
+
+```python
+@runtime_checkable
+class Warmupable(Protocol):
+    async def warmup(self) -> None: ...
+
+@runtime_checkable
+class Closable(Protocol):
+    async def shutdown(self) -> None: ...
+```
+
+`lifespan` 通过 `isinstance(comp, Warmupable)` 统一调用，无需关心具体实现类。
+
+---
+
+### 3.4 领域插件系统 (DomainPlugin)
 
 `rag_framework/domain/base.py` 定义抽象接口，将所有 Android 特定知识收敛到 `AndroidDomainPlugin`：
 
@@ -179,9 +243,11 @@ class DomainPlugin(ABC):
 - `get_term_mapping`：~25 个高频中文技术词 → 英文 keyword（内存泄漏→memory leak、卡顿→ANR jank 等）
 - `rewrite_router_rules`：L0 passthrough / L1 规则扩展 / L2 LLM 重写分级逻辑
 
+> **去副作用化**：模块底部不再执行 `register_domain(AndroidDomainPlugin)`，改为 `ai_app1/main.py` lifespan 中显式注册。
+
 ---
 
-### 3.4 Embedding 服务 (STEmbedder)
+### 3.5 Embedding 服务 (STEmbedder)
 
 `rag_framework/embedding/sentence_transformer.py`：
 
@@ -189,11 +255,11 @@ class DomainPlugin(ABC):
 - **惰性加载**：首次 `encode()` 时才加载模型
 - **L2 归一化**：`normalize_embeddings=True`
 - **分批编码**：`batch_size=32`，可设 `None` 关闭
-- 全局单例，避免重复加载
+- 模块底部通过 `register_embedder("sentence_transformer", _create_st_embedder)` 自注册到工厂注册表
 
 ---
 
-### 3.5 离线索引构建
+### 3.6 离线索引构建
 
 #### 3.5.1 VectorIndexer（统一索引编排器）
 
@@ -226,18 +292,20 @@ class IndexStats:
     ▼
 chunker.chunk_text(size=512, overlap=64)  →  parent chunks + UUID
     │
-    ├──▶ DenseStore.add_batch(parent collection)    ← 语义向量
-    ├──▶ BM25Store.add_documents(doc_id, text)       ← 关键词索引
+    ├──▶ vector_store.add_batch(parent collection)    ← 语义向量
+    ├──▶ BM25Store.add_documents(doc_id, text)         ← 关键词索引
     │
     ├──▶ [enable_child] chunk_text(size=128, overlap=25) per parent
     │         child_id = {parent_id}_c{index}
     │         metadata: {parent_id: ...}
-    │         DenseStore.add_batch(child collection)
+    │         vector_store.add_batch(child collection)
     │
     └──▶ [enable_hyde] generate_hyde_questions(chunks, batch=8)
               asyncio.gather() 并发生成
-              DenseStore.add_batch(hyde collection)
+              vector_store.add_batch(hyde collection)
 ```
+
+> **注意**：`DenseStore` 已更名为 `ChromaVectorStore` 并实现 `VectorStore` 抽象接口，通过 `vector_store_registry` 注册为 `"chroma"` 后端。
 
 **公共入口：**
 - `index_files(file_paths, on_progress?)` — 适合批量文件
@@ -502,9 +570,11 @@ tokens      = int(cn_chars * 1.5 + other_chars * 0.5)
 
 ---
 
-### 3.8 LLM 客户端 (OpenAILLMClient)
+### 3.8 LLM 客户端
 
-`rag_framework/llm/openai_client.py`：
+框架支持两种 LLM 客户端，通过 `llm_backend` 配置切换：
+
+#### OpenAILLMClient（`rag_framework/llm/openai_client.py`）
 
 | 方法 | 用途 | 流式 |
 |------|------|------|
@@ -534,20 +604,63 @@ async for chunk in response:
 
 最多 `MAX_STEPS=10` 轮。
 
+#### LocalLLMClient（`rag_framework/llm/local_client.py`）
+
+本地 transformers 推理客户端，支持 `local` backend：
+
+- **模型**：本地 `models/qwen2.5-1.5b-instruct/`（或其他 HF 格式模型）
+- **设备自适应**：CUDA → MPS → CPU 自动选择
+- **线程安全**：双重检查锁懒加载 + asyncio Semaphore 限流
+- **预热**：`warmup()` 在 lifespan 中异步加载，避免首请求阻塞
+- **权重绑定**：加载时调用 `model.tie_weights()` 确保 `lm_head` 与 `embed_tokens` 共享参数，防止乱码
+
+```python
+# 创建示例
+llm = llm_registry.create("local",
+    model_path="models/qwen2.5-1.5b-instruct",
+    max_tokens=512,
+    max_concurrent=3,
+)
+```
+
 ---
 
 ### 3.9 应用层 (ai_app1)
 
-#### 3.9.1 main.py — 启动预热
+#### 3.9.1 main.py — 生命周期管理
 
 ```python
-@app.on_event("startup")
-async def preload_models():
-    container = get_container()
-    container.embedder._ensure_model()          # BGE-M3 (~3-5s)
-    container.reranker._ensure_model()          # CrossEncoder (~2-3s)
-    await asyncio.to_thread(container.sparse_store.search, "", 1)  # BM25 索引
-    # LLMQueryRewriter 后端按需预热
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    from android_domain.plugin import AndroidDomainPlugin
+    from rag_framework.core.registry import register_domain
+
+    # 1. 显式注册领域插件（去 import-time 副作用）
+    register_domain(AndroidDomainPlugin)
+
+    # 2. 创建容器（若测试已注入则复用）
+    container = getattr(app.state, "container", None)
+    if container is None:
+        container = RAGContainer.from_settings(RAGSettings())
+        app.state.container = container
+
+    # 3. 并发预热所有 Warmupable 组件
+    warmup_tasks = []
+    for comp in container.warmup_targets():
+        warmup_tasks.append(comp.warmup())
+    if warmup_tasks:
+        await asyncio.gather(*warmup_tasks)
+    print("[startup] 所有模型和索引预热完成")
+    yield
+
+    # 4. shutdown：关闭所有 Closable 组件
+    for comp in (container.embedder, container.reranker,
+                 container.vector_store, container.llm):
+        if isinstance(comp, Closable):
+            try:
+                await comp.shutdown()
+            except Exception as e:
+                print(f"[shutdown] 关闭组件出错: {e}")
 ```
 
 #### 3.9.2 api/chat.py — HTTP 接入
@@ -557,12 +670,19 @@ class ChatRequest(BaseModel):
     message: str
     user_id: str = "default_user"
 
+def get_container(request: Request) -> RAGContainer:
+    """从 app.state 读取容器（由 lifespan 注入），测试时可直接替换。"""
+    container = getattr(request.app.state, "container", None)
+    if container is None:
+        raise RuntimeError("RAGContainer 未初始化，请检查 lifespan")
+    return container
+
 @router.post("/chat")
 async def chat(req: ChatRequest, container: RAGContainer = Depends(get_container)):
     async def content_generator():
         async for chunk in container.chat_stream(req.message, req.user_id):
             yield chunk
-    return StreamingResponse(content_generator(), media_type="text/plain")
+    return StreamingResponse(content_generator(), media_type="text/event-stream")
 ```
 
 #### 3.9.3 tests/test_api.py — API 测试

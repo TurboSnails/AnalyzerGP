@@ -13,11 +13,13 @@ from typing import cast
 from sentence_transformers import CrossEncoder
 
 from rag_framework.core.exceptions import ModelLoadError, ModelNotFoundError
+from rag_framework.core.factories import register_reranker
+from rag_framework.core.lifecycle import Warmupable
 from rag_framework.core.logger import reranker_logger
 from rag_framework.rerank.base import Reranker, RankedDoc
 
 
-class CrossEncoderReranker(Reranker):
+class CrossEncoderReranker(Reranker, Warmupable):
     """基于 CrossEncoder 的精排器。"""
 
     def __init__(
@@ -105,3 +107,24 @@ class CrossEncoderReranker(Reranker):
         ranked = sorted(candidates, key=lambda x: x.score, reverse=True)[:top_k]
         reranker_logger.warning(f"Fallback 规则排序: {len(candidates)} → {len(ranked)} 个")
         return ranked
+
+    async def warmup(self) -> None:
+        """异步预热：加载 CrossEncoder 模型。"""
+        import asyncio
+        await asyncio.to_thread(self._ensure_model)
+
+
+# ─── 工厂函数与自注册 ──────────────────────────────────────────
+def _create_cross_encoder_reranker(
+    model_path: str,
+    max_length: int = 512,
+    batch_size: int = 32,
+) -> CrossEncoderReranker:
+    return CrossEncoderReranker(
+        model_path=model_path,
+        max_length=max_length,
+        batch_size=batch_size,
+    )
+
+
+register_reranker("cross_encoder", _create_cross_encoder_reranker)

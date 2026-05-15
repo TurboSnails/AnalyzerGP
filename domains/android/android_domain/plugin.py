@@ -181,5 +181,9 @@ _VAGUE_TERMS = frozenset([
     "什么鬼", "啥情况", "搞不懂", "不明白",
 ])
 
-# 模块导入时自动注册领域插件
-register_domain(AndroidDomainPlugin)
+# 注意：不再在 import 时自动注册。
+# 请在使用方（如 ai_app1/main.py lifespan）显式调用：
+#   from rag_framework.core.registry import PluginRegistry
+#   from android_domain.plugin import AndroidDomainPlugin
+#   registry = PluginRegistry()
+#   registry.register(AndroidDomainPlugin)

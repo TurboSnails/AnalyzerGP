@@ -13,8 +13,10 @@ from typing import TYPE_CHECKING
 
 import chromadb
 
-from rag_framework.core.config import RAGSettings
 from rag_framework.core.exceptions import CollectionNotFoundError, VectorStoreError
+from rag_framework.core.factories import register_vector_store
+from rag_framework.core.lifecycle import Warmupable
+from rag_framework.retrieval.base import VectorStore
 
 if TYPE_CHECKING:
     from rag_framework.embedding.base import Embedder
@@ -22,7 +24,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger("vector_store")
 
 
-class DenseStore:
+class ChromaVectorStore(VectorStore, Warmupable):
     """
     ChromaDB 向量存储封装。
 
@@ -119,3 +121,23 @@ class DenseStore:
             metadatas=metadatas,
             embeddings=embeddings,
         )
+
+    async def warmup(self) -> None:
+        """预热：建立 ChromaDB 连接并验证 collections。"""
+        import asyncio
+        await asyncio.to_thread(self._get_client)
+
+
+# ─── 兼容旧名称 ───────────────────────────────────────────────
+DenseStore = ChromaVectorStore
+
+
+# ─── 工厂函数与自注册 ──────────────────────────────────────────
+def _create_chroma_store(
+    chroma_path: str,
+    embedder: Embedder,
+) -> ChromaVectorStore:
+    return ChromaVectorStore(chroma_path=chroma_path, embedder=embedder)
+
+
+register_vector_store("chroma", _create_chroma_store)

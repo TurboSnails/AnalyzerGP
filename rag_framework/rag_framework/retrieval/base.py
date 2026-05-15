@@ -1,11 +1,14 @@
 """
-Retriever 抽象基类
+Retriever & VectorStore 抽象基类
 
 支持单路/多路检索，返回带元数据的候选文档。
 retrieve() 为 async 接口，CPU/IO 密集型子步骤通过 asyncio.to_thread 卸载。
+
+VectorStore 抽象 ChromaDB/Milvus/Pinecone 等向量存储的通用操作。
 """
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from typing import Any
 
 from rag_framework.domain.base import QueryRoute
 
@@ -48,4 +51,60 @@ class Retriever(ABC):
         Returns:
             RetrievalResult
         """
+        ...
+
+
+class VectorStore(ABC):
+    """
+    向量存储抽象基类。
+
+    统一 ChromaDB、Milvus、Pinecone 等向量数据库的通用操作接口。
+    支持多 collection 查询与批量写入。
+    """
+
+    @abstractmethod
+    def get_collection(self, name: str) -> Any | None:
+        """
+        获取 collection 句柄或元数据。
+
+        Returns:
+            collection 对象，或 None 表示不存在。
+        """
+        ...
+
+    @abstractmethod
+    def query(
+        self,
+        query: str,
+        collection_name: str,
+        n_results: int = 10,
+        **filters: Any,
+    ) -> tuple[list[str], list[float], list[dict]]:
+        """
+        向量相似度查询。
+
+        Returns:
+            (ids, distances, metadatas)
+        """
+        ...
+
+    @abstractmethod
+    def fetch_parents(self, parent_ids: list[str], collection_name: str) -> dict[str, str]:
+        """
+        批量拉取 parent 文档全文。
+
+        Returns:
+            {parent_id: text, ...}
+        """
+        ...
+
+    @abstractmethod
+    def add_batch(
+        self,
+        collection_name: str,
+        ids: list[str],
+        texts: list[str],
+        metadatas: list[dict],
+    ) -> None:
+        """批量添加文档（含自动编码 embedding）。"""
         ...

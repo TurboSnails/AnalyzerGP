@@ -139,3 +139,10 @@ class DomainNotFoundError(DomainError):
 class DomainConfigError(DomainError):
     """领域配置错误。"""
     pass
+
+
+# ─── 工厂层 ─────────────────────────────────────────────────────────────────────
+
+class ComponentNotFoundError(RAGError):
+    """组件工厂未找到指定的后端实现。"""
+    pass

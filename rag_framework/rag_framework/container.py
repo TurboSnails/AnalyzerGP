@@ -2,161 +2,181 @@
 RAG 依赖注入容器
 
 替代全局单例，统一管理所有组件的生命周期。
+所有组件通过工厂注册表创建，支持热插拔替换实现类。
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
+
+# ── 触发所有实现类的自注册 ──────────────────────────────────────────
+# 必须在导入 factories 之后、使用注册表之前，确保各后端已注册。
+from rag_framework.embedding import sentence_transformer  # noqa: F401
+from rag_framework.retrieval import dense, sparse, fusion  # noqa: F401
+from rag_framework.llm import local_client, openai_client  # noqa: F401
+from rag_framework.rerank import cross_encoder  # noqa: F401
+from rag_framework.session import memory_store  # noqa: F401
+from rag_framework.retrieval.query_rewriter import (  # noqa: F401
+    rule_rewriter,
+    llm_rewriter,
+    qwen_rewriter,
+)
 
 from rag_framework.core.config import RAGSettings
+from rag_framework.core.factories import (
+    embedder_registry,
+    llm_registry,
+    reranker_registry,
+    retriever_registry,
+    rewriter_registry,
+    session_store_registry,
+    vector_store_registry,
+)
+from rag_framework.core.lifecycle import Warmupable
 from rag_framework.core.logger import setup_logging
 from rag_framework.core.registry import get_domain, list_domains
-from rag_framework.domain.base import DomainPlugin
-from rag_framework.embedding.base import Embedder
-from rag_framework.embedding.sentence_transformer import STEmbedder
-from rag_framework.llm.base import LLMClient
-from rag_framework.llm.openai_client import OpenAILLMClient
-from rag_framework.rerank.base import Reranker
-from rag_framework.rerank.cross_encoder import CrossEncoderReranker
-from rag_framework.retrieval.dense import DenseStore
-from rag_framework.retrieval.sparse import BM25Store
-from rag_framework.retrieval.fusion import HybridRetriever
-from rag_framework.retrieval.query_rewriter import (
-    RuleQueryRewriter,
-    LLMQueryRewriter,
-    QwenQueryRewriter,
-)
-from rag_framework.session.base import SessionStore
-from rag_framework.session.memory_store import MemorySessionStore
+
+if TYPE_CHECKING:
+    from rag_framework.domain.base import DomainPlugin
+    from rag_framework.embedding.base import Embedder
+    from rag_framework.llm.base import LLMClient
+    from rag_framework.rerank.base import Reranker
+    from rag_framework.retrieval.base import Retriever, VectorStore
+    from rag_framework.retrieval.query_rewriter.base import QueryRewriter
+    from rag_framework.session.base import SessionStore
 
 
-@dataclass
+@dataclass(frozen=True, slots=True)
 class RAGContainer:
     """
-    RAG 依赖注入容器。
+    RAG 依赖注入容器（不可变）。
 
     组合所有框架组件，提供统一访问入口。
+    通过工厂注册表创建，各组件实现可热插拔替换。
     """
+
     settings: RAGSettings
     embedder: Embedder
-    dense_store: DenseStore
-    sparse_store: BM25Store
-    retriever: HybridRetriever
+    vector_store: VectorStore
+    retriever: Retriever
     reranker: Reranker
     llm: LLMClient
     session_store: SessionStore
     domain: DomainPlugin
-    rule_rewriter: RuleQueryRewriter | None = None
-    llm_rewriter: LLMQueryRewriter | None = None
+    rule_rewriter: QueryRewriter | None = field(default=None, compare=False)
+    llm_rewriter: QueryRewriter | None = field(default=None, compare=False)
 
     @classmethod
-    def from_settings(cls, settings: RAGSettings | None = None) -> "RAGContainer":
+    def from_settings(
+        cls,
+        settings: RAGSettings | None = None,
+        *,
+        _domain_override: DomainPlugin | None = None,
+    ) -> "RAGContainer":
         """
         从配置构建完整容器。
 
-        自动初始化日志、加载模型、建立数据库连接。
+        自动初始化日志、通过工厂注册表创建各组件。
+        若传入了 _domain_override 则跳过自动发现（用于测试）。
         """
         settings = settings or RAGSettings()
         setup_logging(level=settings.log_level)
 
-        # Embedding
-        embedder = STEmbedder(
+        # ── 1. Embedder ──
+        embedder = embedder_registry.create(
+            settings.embed_backend,
             model_path=settings.embed_model_path,
             device=settings.embed_device,
             normalize=settings.embed_normalize,
         )
 
-        # Dense Store
-        dense_store = DenseStore(
+        # ── 2. Vector Store ──
+        vector_store = vector_store_registry.create(
+            settings.vector_store_backend,
             chroma_path=settings.chroma_db_path,
             embedder=embedder,
         )
 
-        # Sparse Store
-        sparse_store = BM25Store(
-            index_dir=settings.bm25_index_dir,
-            chroma_path=settings.chroma_db_path,
+        # ── 3. LLM ──
+        llm_kwargs = {
+            "base_url": settings.llm_base_url,
+            "api_key": settings.resolved_llm_api_key,
+            "model": settings.llm_model,
+            "backend": settings.llm_backend,
+            "max_tokens": settings.llm_max_tokens,
+            "max_concurrent": settings.llm_max_concurrent,
+        }
+        if settings.llm_backend == "local":
+            llm_kwargs["model_path"] = settings.llm_local_model_path
+        llm = llm_registry.create(
+            settings.llm_backend,
+            **llm_kwargs,
         )
 
-        # Reranker
-        reranker = CrossEncoderReranker(
+        # ── 4. Reranker ──
+        reranker = reranker_registry.create(
+            settings.reranker_backend,
             model_path=settings.reranker_model_path,
             max_length=settings.reranker_max_length,
             batch_size=settings.reranker_batch_size,
         )
 
-        # LLM（根据 backend 选择本地 transformers 或远程 OpenAI 兼容 API）
-        if settings.llm_backend == "local":
-            from rag_framework.llm.local_client import LocalLLMClient
-            llm = LocalLLMClient(
-                model_path=settings.llm_local_model_path,
-                max_tokens=settings.llm_max_tokens,
-                max_concurrent=settings.llm_max_concurrent,
-            )
-        else:
-            llm = OpenAILLMClient(
-                base_url=settings.llm_base_url,
-                api_key=settings.resolved_llm_api_key,
-                model=settings.llm_model,
-                backend=settings.llm_backend,
-                max_tokens=settings.llm_max_tokens,
-                max_concurrent=settings.llm_max_concurrent,
-            )
-
-        # Session
-        session_store = MemorySessionStore(
+        # ── 5. Session Store ──
+        session_store = session_store_registry.create(
+            settings.session_store_backend,
             default_budget=settings.default_token_budget,
         )
 
-        # Domain — 若尚未注册，自动发现并加载领域插件包
-        if settings.active_domain not in list_domains():
+        # ── 6. Domain ──
+        if _domain_override is not None:
+            domain = _domain_override
+        else:
+            # 兼容旧逻辑：若未注册则尝试自动发现
+            if settings.active_domain not in list_domains():
+                try:
+                    import importlib
+                    import sys
+                    from pathlib import Path
+
+                    repo_root = Path(__file__).resolve().parents[2]
+                    domain_pkg = repo_root / "domains" / settings.active_domain
+                    if domain_pkg.is_dir():
+                        pkg_path = str(domain_pkg)
+                        if pkg_path not in sys.path:
+                            sys.path.insert(0, pkg_path)
+                    importlib.import_module(f"{settings.active_domain}_domain")
+                except Exception:
+                    pass
+            domain = get_domain(settings.active_domain)
+
+        # ── 7. Rewriters ──
+        rule_rewriter = None
+        try:
+            rule_rewriter = rewriter_registry.create("rule", domain=domain)
+        except Exception:
+            pass
+
+        llm_rewriter = None
+        if rewriter_registry.is_registered("llm"):
             try:
-                import importlib
-                import sys
-                repo_root = Path(__file__).resolve().parents[2]
-                domain_pkg = repo_root / "domains" / settings.active_domain
-                if domain_pkg.is_dir():
-                    pkg_path = str(domain_pkg)
-                    if pkg_path not in sys.path:
-                        sys.path.insert(0, pkg_path)
-                importlib.import_module(f"{settings.active_domain}_domain")
+                llm_rewriter = rewriter_registry.create("llm", llm=llm)
             except Exception:
                 pass
 
-        domain = get_domain(settings.active_domain)
-
-        # Hybrid Retriever (依赖 domain 的 collection names)
-        retriever = HybridRetriever(
+        # ── 8. Retriever ──
+        retriever = retriever_registry.create(
+            settings.retriever_backend,
             settings=settings,
             embedder=embedder,
-            dense_store=dense_store,
-            sparse_store=sparse_store,
+            vector_store=vector_store,
             reranker=reranker,
             domain=domain,
         )
 
-        # Rewriters
-        rule_rewriter = RuleQueryRewriter(domain=domain)
-        from pathlib import Path
-        from rag_framework.core.logger import get_logger as _get_logger
-        _clog = _get_logger("rag.container")
-        backend = settings.rewriter_backend
-        model_path = settings.rewriter_model
-        if backend == "local" or (backend == "auto" and Path(model_path).is_dir()):
-            _clog.info(f"LLM 改写器: backend=local, path={model_path!r}")
-            llm_rewriter = QwenQueryRewriter(
-                model_path=model_path,
-                max_new_tokens=settings.rewriter_max_tokens,
-            )
-        else:
-            _clog.info(f"LLM 改写器: backend=remote(minimax), model={llm.model!r}")
-            llm_rewriter = LLMQueryRewriter(llm=llm, max_tokens=settings.rewriter_max_tokens)
-
         return cls(
             settings=settings,
             embedder=embedder,
-            dense_store=dense_store,
-            sparse_store=sparse_store,
+            vector_store=vector_store,
             retriever=retriever,
             reranker=reranker,
             llm=llm,
@@ -179,6 +199,7 @@ class RAGContainer:
         3. 流式调用 LLM
         """
         from rag_framework.session.manager import SessionManager
+
         manager = SessionManager(
             store=self.session_store,
             llm=self.llm,
@@ -198,13 +219,26 @@ class RAGContainer:
         Returns:
             list[QueryRoute]，第一条为原始/改写后的主 query。
         """
-        level = self.domain.rewrite_router_rules(query, history)
+        # SessionManager 中已包含 rewriter 逻辑，此处复用其内部实现
+        from rag_framework.session.manager import SessionManager
 
-        if level == 2 and self.llm_rewriter is not None:
-            return self.llm_rewriter.rewrite(query, history)
+        manager = SessionManager(
+            store=self.session_store,
+            llm=self.llm,
+            retriever=self.retriever,
+            domain=self.domain,
+            settings=self.settings,
+            rule_rewriter=self.rule_rewriter,
+            llm_rewriter=self.llm_rewriter,
+        )
+        return manager._build_routes(query, history)
 
-        if level == 1 and self.rule_rewriter is not None:
-            return self.rule_rewriter.rewrite(query, history)
+    # ─── 生命周期 ───────────────────────────────────────────────────────────────
 
-        route = self.domain.classify_query(query, history)
-        return [route]
+    def warmup_targets(self) -> list[Warmupable]:
+        """返回所有支持预热的组件（供 lifespan 统一调用）。"""
+        targets: list[Warmupable] = []
+        for comp in (self.embedder, self.reranker, self.vector_store, self.llm):
+            if isinstance(comp, Warmupable):
+                targets.append(comp)
+        return targets

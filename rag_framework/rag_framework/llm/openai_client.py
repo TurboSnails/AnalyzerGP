@@ -12,11 +12,13 @@ from typing import AsyncIterator
 
 import openai
 
+from rag_framework.core.factories import register_llm
+from rag_framework.core.lifecycle import Closable
 from rag_framework.core.logger import ai_client_logger
 from rag_framework.llm.base import LLMClient
 
 
-class OpenAILLMClient(LLMClient):
+class OpenAILLMClient(LLMClient, Closable):
     """
     多后端 LLM 客户端（OpenAI 兼容协议）。
 
@@ -216,6 +218,10 @@ class OpenAILLMClient(LLMClient):
                 kwargs["tools"] = tools
         return kwargs
 
+    async def shutdown(self) -> None:
+        """关闭底层 HTTP 客户端。"""
+        await self.client.close()
+
     @staticmethod
     def _execute_tools(tool_calls: list[dict]) -> list[dict]:
         from rag_framework.llm.tool_registry import execute_tool
@@ -233,3 +239,27 @@ class OpenAILLMClient(LLMClient):
                 "content": str(result),
             })
         return results
+
+
+# ─── 工厂函数与自注册 ──────────────────────────────────────────
+def _create_openai_llm(
+    base_url: str = "",
+    api_key: str = "",
+    model: str = "",
+    backend: str = "openai",
+    max_tokens: int = 512,
+    max_concurrent: int = 3,
+) -> OpenAILLMClient:
+    return OpenAILLMClient(
+        base_url=base_url,
+        api_key=api_key,
+        model=model,
+        backend=backend,
+        max_tokens=max_tokens,
+        max_concurrent=max_concurrent,
+    )
+
+
+register_llm("openai", _create_openai_llm)
+register_llm("minimax", _create_openai_llm)
+register_llm("ollama", _create_openai_llm)

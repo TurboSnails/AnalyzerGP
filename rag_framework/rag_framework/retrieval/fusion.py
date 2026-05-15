@@ -17,14 +17,14 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from rag_framework.core.config import RAGSettings
+from rag_framework.core.factories import register_retriever
 from rag_framework.core.logger import retrieval_logger
 from rag_framework.domain.base import DomainPlugin, QueryRoute
-from rag_framework.retrieval.base import Retriever, RetrievalResult, RetrievedDoc
+from rag_framework.retrieval.base import Retriever, RetrievalResult, RetrievedDoc, VectorStore
 from rag_framework.rerank.base import Reranker, RankedDoc
 
 if TYPE_CHECKING:
     from rag_framework.embedding.base import Embedder
-    from rag_framework.retrieval.dense import DenseStore
     from rag_framework.retrieval.sparse import BM25Store
 
 
@@ -58,7 +58,7 @@ class HybridRetriever(Retriever):
         self,
         settings: RAGSettings,
         embedder: "Embedder",
-        dense_store: "DenseStore",
+        vector_store: VectorStore,
         sparse_store: "BM25Store",
         reranker: Reranker,
         domain: DomainPlugin,
@@ -75,7 +75,7 @@ class HybridRetriever(Retriever):
             rerank_timeout=settings.retrieval_rerank_timeout,
         )
         self._embedder = embedder
-        self._dense = dense_store
+        self._dense = vector_store
         self._sparse = sparse_store
         self._reranker = reranker
         self._domain = domain
@@ -341,3 +341,32 @@ class HybridRetriever(Retriever):
             return RetrievalResult(docs=docs, query=query)
         except Exception:
             return RetrievalResult(docs=[], query=query)
+
+
+# ─── 工厂函数与自注册 ──────────────────────────────────────────
+def _create_hybrid_retriever(
+    settings: RAGSettings,
+    embedder: Embedder,
+    vector_store: VectorStore,
+    reranker: Reranker,
+    domain: DomainPlugin,
+    sparse_store: Any = None,
+) -> HybridRetriever:
+    """创建 HybridRetriever，sparse_store 可选，默认自动创建 BM25。"""
+    if sparse_store is None:
+        from rag_framework.retrieval.sparse import BM25Store
+        sparse_store = BM25Store(
+            index_dir=settings.bm25_index_dir,
+            chroma_path=settings.chroma_db_path,
+        )
+    return HybridRetriever(
+        settings=settings,
+        embedder=embedder,
+        vector_store=vector_store,
+        sparse_store=sparse_store,
+        reranker=reranker,
+        domain=domain,
+    )
+
+
+register_retriever("hybrid", _create_hybrid_retriever)

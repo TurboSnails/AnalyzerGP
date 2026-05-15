@@ -14,11 +14,13 @@ import threading
 import time
 from typing import AsyncIterator
 
+from rag_framework.core.factories import register_llm
+from rag_framework.core.lifecycle import Warmupable
 from rag_framework.core.logger import ai_client_logger
 from rag_framework.llm.base import LLMClient
 
 
-class LocalLLMClient(LLMClient):
+class LocalLLMClient(LLMClient, Warmupable):
     """
     本地 transformers LLM 客户端。
 
@@ -100,13 +102,37 @@ class LocalLLMClient(LLMClient):
             t0 = time.monotonic()
 
             tokenizer = AutoTokenizer.from_pretrained(self._model_path)
+            # 使用 from_pretrained 加载权重（low_cpu_mem_usage=False 避免延迟加载）
+            # 但 transformers 对缺失的 tied weight 仍会创建 meta tensor，
+            # 因此加载后需显式 materialize，再调用 .to(device)
             model = AutoModelForCausalLM.from_pretrained(
                 self._model_path,
                 torch_dtype=dtype,
-                device_map=device,
+                low_cpu_mem_usage=False,
             )
-            # Qwen2 系列需要显式 tie_weights，否则 lm_head 随机初始化导致乱码
             model.tie_weights()
+
+            # 处理残留的 meta tensor（如缺失的 lm_head.weight）
+            # tie_weights() 理论上会共享 embed_tokens.weight，但某些版本 transformers
+            # 不会更新 _parameters 中的 meta tensor 引用，导致 .to(device) 报错
+            for name, param in list(model.named_parameters()):
+                if param.device.type == "meta":
+                    # 对 tied embeddings 的 lm_head，直接共享 embed_tokens 权重
+                    if "lm_head.weight" in name and getattr(model.config, "tie_word_embeddings", False):
+                        embed = model.get_input_embeddings()
+                        if embed is not None and embed.weight.device.type != "meta":
+                            model.lm_head.weight = embed.weight
+                            continue
+                    # 其他 meta tensor：用空张量 materialize（通常不会发生）
+                    parent_name = name.rsplit(".", 1)[0]
+                    attr_name = name.rsplit(".", 1)[1]
+                    module = model.get_submodule(parent_name)
+                    empty = torch.empty_like(param, device="cpu")
+                    module._parameters[attr_name] = torch.nn.Parameter(
+                        empty, requires_grad=param.requires_grad
+                    )
+
+            model = model.to(device)
             model.eval()
 
             self._tokenizer = tokenizer
@@ -247,3 +273,27 @@ class LocalLLMClient(LLMClient):
                     yield new_text
         finally:
             thread.join()
+
+    async def warmup(self) -> None:
+        """异步预热：加载 tokenizer 和 model。"""
+        await asyncio.to_thread(self._ensure_loaded)
+
+
+# ─── 工厂函数与自注册 ──────────────────────────────────────────
+def _create_local_llm(
+    model_path: str = "",
+    max_tokens: int = 512,
+    max_concurrent: int = 1,
+    **_ignored: object,
+) -> LocalLLMClient:
+    # 默认使用 CPU + float32，避免 MPS (macOS Metal) 上 Qwen 模型的 dtype 崩溃
+    return LocalLLMClient(
+        model_path=model_path,
+        max_tokens=max_tokens,
+        max_concurrent=max_concurrent,
+        device="cpu",
+        dtype="float32",
+    )
+
+
+register_llm("local", _create_local_llm)

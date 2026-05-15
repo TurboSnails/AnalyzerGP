@@ -3,6 +3,12 @@ ai_app1 — Android 开发助手（薄应用层）
 
 基于 rag_framework + AndroidDomainPlugin 构建。
 仅负责 HTTP 服务启动、静态文件、CORS 等 Web 层职责。
+
+生命周期：
+  1. lifespan 显式注册领域插件
+  2. 通过工厂注册表创建 RAGContainer
+  3. 统一预热所有 Warmupable 组件
+  4. shutdown 时关闭所有 Closable 组件
 """
 import asyncio
 from contextlib import asynccontextmanager
@@ -13,39 +19,67 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
+from rag_framework.container import RAGContainer
+from rag_framework.core.config import RAGSettings
+from rag_framework.core.lifecycle import Warmupable, Closable
+
+# ── 触发所有实现类的自注册（子模块导入不会自动执行 __init__.py） ──
+from rag_framework.embedding import sentence_transformer  # noqa: F401
+from rag_framework.retrieval import dense, sparse, fusion  # noqa: F401
+from rag_framework.llm import local_client, openai_client  # noqa: F401
+from rag_framework.rerank import cross_encoder  # noqa: F401
+from rag_framework.session import memory_store  # noqa: F401
+from rag_framework.retrieval.query_rewriter import (  # noqa: F401
+    rule_rewriter,
+    llm_rewriter,
+    qwen_rewriter,
+)
+
 from ai_app1.api.chat import router as chat_router
 
 
 @asynccontextmanager
-async def lifespan(_: FastAPI):
-    """启动时注册领域插件并并发预热所有模型。"""
-    from rag_framework.core.registry import register_domain
-    from android_domain import AndroidDomainPlugin
+async def lifespan(app: FastAPI):
+    """启动时注册领域插件、创建容器、并发预热；关闭时释放资源。"""
+    from android_domain.plugin import AndroidDomainPlugin
 
-    # 注册 Android 领域插件（必须在 get_container() 之前完成）
+    # 1. 显式注册领域插件到全局注册表（去 import-time 副作用）
+    from rag_framework.core.registry import register_domain
     register_domain(AndroidDomainPlugin)
 
-    # 使用 chat 模块的单例容器——确保预热的和请求用的是同一个实例
-    from ai_app1.api.chat import get_container
-    container = get_container()
+    # 2. 创建容器（通过工厂注册表，所有组件可插拔）
+    #    若测试已注入容器，则复用，避免加载真实模型
+    container = getattr(app.state, "container", None)
+    if container is None:
+        container = RAGContainer.from_settings(RAGSettings())
+        app.state.container = container
 
-    # 并发预热 embedding / reranker / BM25（互相独立，节省启动时间）
-    await asyncio.gather(
-        asyncio.to_thread(container.embedder._ensure_model),
-        asyncio.to_thread(container.reranker._ensure_model),
-        asyncio.to_thread(container.sparse_store._ensure_loaded),
-    )
+    # 3. 并发预热所有 Warmupable 组件
+    warmup_tasks = []
+    for comp in container.warmup_targets():
+        warmup_tasks.append(comp.warmup())
 
-    # 预热 Qwen 改写器（避免首条用户请求承担 ~3s 加载延迟）
-    if hasattr(container.llm_rewriter, "_ensure_loaded"):
-        await asyncio.to_thread(container.llm_rewriter._ensure_loaded)
+    if warmup_tasks:
+        await asyncio.gather(*warmup_tasks)
 
     print("[startup] 所有模型和索引预热完成")
     yield
-    # shutdown：无需显式清理（进程退出时自动释放）
+
+    # 4. shutdown：关闭所有 Closable 组件
+    for comp in (
+        container.embedder,
+        container.reranker,
+        container.vector_store,
+        container.llm,
+    ):
+        if isinstance(comp, Closable):
+            try:
+                await comp.shutdown()
+            except Exception as e:
+                print(f"[shutdown] 关闭组件出错: {e}")
 
 
-app = FastAPI(title="Android 开发助手", version="2.0.0", lifespan=lifespan)
+app = FastAPI(title="Android 开发助手", version="2.1.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -67,4 +101,4 @@ def root():
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "version": "2.0.0"}
+    return {"status": "ok", "version": "2.1.0"}

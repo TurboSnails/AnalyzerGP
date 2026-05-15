@@ -134,8 +134,15 @@ class RAGSettings(BaseSettings):
         extra="ignore",  # 忽略未知环境变量，兼容旧配置
     )
 
+    # ── 后端选择（通过工厂注册表创建组件）─────────────────────────────────────
+    embed_backend: str = "sentence_transformer"
+    vector_store_backend: str = "chroma"
+    llm_backend: str = "local"
+    reranker_backend: str = "cross_encoder"
+    session_store_backend: str = "memory"
+    retriever_backend: str = "hybrid"
+
     # ── LLM ──────────────────────────────────────────────────────────────────
-    llm_backend: Literal["minimax", "ollama", "openai", "local"] = "local"
     llm_base_url: str = ""
     llm_model: str = ""
     llm_api_key: str = ""

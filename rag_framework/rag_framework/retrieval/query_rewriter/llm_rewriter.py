@@ -12,6 +12,7 @@ import asyncio
 import time
 from concurrent.futures import ThreadPoolExecutor
 
+from rag_framework.core.factories import register_rewriter
 from rag_framework.core.logger import get_logger
 from rag_framework.domain.base import QueryRoute
 from rag_framework.llm.base import LLMClient
@@ -103,3 +104,11 @@ class LLMQueryRewriter(QueryRewriter):
                 loop.close()
 
         return self._executor.submit(_target).result(timeout=15)
+
+
+# ─── 工厂函数与自注册 ──────────────────────────────────────────
+def _create_llm_rewriter(llm: LLMClient, max_tokens: int = 128) -> LLMQueryRewriter:
+    return LLMQueryRewriter(llm=llm, max_tokens=max_tokens)
+
+
+register_rewriter("llm", _create_llm_rewriter)
