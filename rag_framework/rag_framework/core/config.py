@@ -117,6 +117,18 @@ def _default_bm25_path() -> str:
     return str(Path(_default_chroma_path()).parent / "tantivy_bm25")
 
 
+def _default_llamaindex_path() -> str:
+    """默认 LlamaIndex 持久化目录。"""
+    repo = _default_repo_root()
+    return str(repo / "pre" / "llamaindex")
+
+
+def _default_torch_cache_path() -> str:
+    """默认 PyTorch 模型缓存目录。"""
+    repo = _default_repo_root()
+    return str(repo / "models" / "torch_cache")
+
+
 # ─── 主配置类 ───────────────────────────────────────────────────────────────────
 
 class RAGSettings(BaseSettings):
@@ -308,6 +320,21 @@ class RAGSettings(BaseSettings):
     # ── Logging ──────────────────────────────────────────────────────────────
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
     log_format: str = "%(asctime)s [%(levelname)s] %(name)s - %(message)s"
+
+    # ── LlamaIndex ───────────────────────────────────────────────────────────
+    llamaindex_enabled: bool = False
+    llamaindex_index_dir: str = Field(default_factory=_default_llamaindex_path)
+    llamaindex_index_type: str = "vector"
+    llamaindex_response_mode: str = "no_text"
+    llamaindex_similarity_top_k: int = 10
+    llamaindex_enable_hybrid: bool = False
+
+    # ── PyTorch Models ───────────────────────────────────────────────────────
+    torch_device: str = "auto"
+    torch_intent_model_path: str = ""
+    torch_sentiment_model_path: str = ""
+    torch_ner_model_path: str = ""
+    torch_cache_dir: str = Field(default_factory=_default_torch_cache_path)
 
     # ── 兼容旧配置（从 ai_app1/.env 读取） ────────────────────────────────────
     openai_api_key: str = ""  # 作为 llm_api_key 的 fallback

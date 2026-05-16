@@ -27,6 +27,13 @@ dependencies = [
     "msmarco-domain",
     "datasets>=2.0.0",
     "accelerate>=1.13.0",
+    # ai_app4 新增依赖（LlamaIndex + PyTorch 任务模型）
+    "llama-index-core>=0.12.0",
+    "transformers>=4.46.0",
+    "torch>=2.5.0",
+    "sqlalchemy>=2.0.0",
+    "asyncpg>=0.30.0",
+    "redis>=5.2.0",
 ]
 
 [tool.uv.sources]

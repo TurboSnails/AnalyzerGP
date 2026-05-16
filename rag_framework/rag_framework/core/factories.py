@@ -60,6 +60,9 @@ reranker_registry = _Registry[Any]("reranker")
 session_store_registry = _Registry[Any]("session_store")
 rewriter_registry = _Registry[Any]("rewriter")
 retriever_registry = _Registry[Any]("retriever")
+llamaindex_retriever_registry = _Registry[Any]("llamaindex_retriever")
+torch_model_registry = _Registry[Any]("torch_model")
+persistence_registry = _Registry[Any]("persistence")
 
 
 # ─── 便捷注册函数 ────────────────────────────────────────────
@@ -89,3 +92,15 @@ def register_rewriter(name: str, factory: Callable[..., Any]) -> None:
 
 def register_retriever(name: str, factory: Callable[..., Any]) -> None:
     retriever_registry.register(name, factory)
+
+
+def register_llamaindex_retriever(name: str, factory: Callable[..., Any]) -> None:
+    llamaindex_retriever_registry.register(name, factory)
+
+
+def register_torch_model(name: str, factory: Callable[..., Any]) -> None:
+    torch_model_registry.register(name, factory)
+
+
+def register_persistence(name: str, factory: Callable[..., Any]) -> None:
+    persistence_registry.register(name, factory)

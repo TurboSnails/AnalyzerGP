@@ -21,6 +21,29 @@ class CollectionNames:
 
 
 @dataclass(frozen=True)
+class LlamaIndexConfig:
+    """LlamaIndex 索引配置描述。"""
+    index_type: str = "vector"           # vector | summary | keyword | tree | kg
+    doc_paths: list[str] = field(default_factory=list)
+    persist_dir: str = ""
+    response_mode: str = "no_text"       # no_text | compact | tree_summarize
+    similarity_top_k: int = 10
+    enable_hybrid: bool = False
+    node_parser: dict = field(default_factory=dict)  # 分块参数
+
+
+@dataclass(frozen=True)
+class TorchTaskConfig:
+    """PyTorch 任务模型配置描述。"""
+    task_name: str = ""                  # intent_classification | sentiment_analysis | ner
+    model_path: str = ""                 # 本地路径或 HuggingFace model_id
+    model_id: str = ""                   # 替代 model_path，用于在线下载
+    device: str = "auto"
+    batch_size: int = 1
+    kwargs: dict = field(default_factory=dict)  # 额外推理参数
+
+
+@dataclass(frozen=True)
 class QueryRoute:
     """查询分类结果，决定召回路径与权重。"""
     text: str
@@ -116,6 +139,29 @@ class DomainPlugin(ABC):
         返回 rewrite level（0/1/2）或 None（使用框架默认规则）。
         """
         return None
+
+    @property
+    def llamaindex_config(self) -> LlamaIndexConfig | None:
+        """
+        LlamaIndex 索引配置描述。
+
+        返回 None 表示该领域不使用 LlamaIndex（兼容旧实现）。
+        """
+        return None
+
+    @property
+    def torch_tasks(self) -> list[TorchTaskConfig]:
+        """
+        该领域需要的 PyTorch 任务模型列表。
+
+        默认空列表，表示不需要 PyTorch 模型（兼容旧实现）。
+        """
+        return []
+
+    @property
+    def tenant_enabled(self) -> bool:
+        """该领域是否支持多租户模式。"""
+        return False
 
     def fallback_response(self, reason: str = "low_confidence") -> str:
         """

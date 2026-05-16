@@ -25,11 +25,13 @@ from rag_framework.retrieval.query_rewriter import (  # noqa: F401
 from rag_framework.core.config import RAGSettings
 from rag_framework.core.factories import (
     embedder_registry,
+    llamaindex_retriever_registry,
     llm_registry,
     reranker_registry,
     retriever_registry,
     rewriter_registry,
     session_store_registry,
+    torch_model_registry,
     vector_store_registry,
 )
 from rag_framework.core.lifecycle import Warmupable
@@ -66,6 +68,8 @@ class RAGContainer:
     domain: DomainPlugin
     rule_rewriter: QueryRewriter | None = field(default=None, compare=False)
     llm_rewriter: QueryRewriter | None = field(default=None, compare=False)
+    llamaindex_retriever: Retriever | None = field(default=None, compare=False)
+    torch_models: dict[str, Any] = field(default_factory=dict, compare=False)
 
     @classmethod
     def from_settings(
@@ -205,6 +209,87 @@ class RAGContainer:
             domain_filter=domain.name if domain else "",
         )
 
+        # ── 9. LlamaIndex Retriever（可选，由配置开关） ──
+        llamaindex_retriever = None
+        if settings.llamaindex_enabled and domain and domain.llamaindex_config:
+            # 触发自注册（import-time side effect）
+            from rag_framework.llamaindex import base as _li_base  # noqa: F401
+            li_cfg = domain.llamaindex_config
+            from rag_framework.llamaindex.index_config import IndexDescription
+
+            idx_desc = IndexDescription(
+                domain_name=domain.name,
+                index_type=li_cfg.index_type,
+                persist_dir=li_cfg.persist_dir or settings.llamaindex_index_dir,
+                doc_paths=li_cfg.doc_paths,
+                response_mode=li_cfg.response_mode or settings.llamaindex_response_mode,
+                similarity_top_k=li_cfg.similarity_top_k or settings.llamaindex_similarity_top_k,
+                enable_hybrid=li_cfg.enable_hybrid or settings.llamaindex_enable_hybrid,
+                node_parser=li_cfg.node_parser,
+            )
+            if llamaindex_retriever_registry.is_registered("default"):
+                try:
+                    llamaindex_retriever = llamaindex_retriever_registry.create(
+                        "default",
+                        settings=settings,
+                        embedder=embedder,
+                        index_description=idx_desc,
+                    )
+                except Exception as exc:
+                    retrieval_logger = __import__(
+                        "rag_framework.core.logger", fromlist=["retrieval_logger"]
+                    ).retrieval_logger
+                    retrieval_logger.warning(f"LlamaIndex Retriever 创建失败: {exc}")
+
+        # ── 10. PyTorch 任务模型（可选，由 DomainPlugin 声明） ──
+        torch_models: dict[str, Any] = {}
+        if domain and domain.torch_tasks:
+            # 触发自注册（import-time side effect）
+            from rag_framework.torch_models import (  # noqa: F401
+                intent_classifier,
+                sentiment_analyzer,
+                entity_recognizer,
+            )
+            for task_cfg in domain.torch_tasks:
+                task_name = task_cfg.task_name
+                if not task_name:
+                    continue
+                model_key = task_cfg.model_path or task_cfg.model_id or task_name
+                if torch_model_registry.is_registered(task_name):
+                    try:
+                        model = torch_model_registry.create(
+                            task_name,
+                            model_path=model_key,
+                            device=settings.torch_device,
+                            batch_size=task_cfg.batch_size,
+                            **task_cfg.kwargs,
+                        )
+                        torch_models[task_name] = model
+                    except Exception as exc:
+                        logger = __import__(
+                            "rag_framework.core.logger", fromlist=["get_logger"]
+                        ).get_logger("rag.container")
+                        logger.warning(f"PyTorch 模型 '{task_name}' 创建失败: {exc}")
+                else:
+                    # fallback：尝试用通用名注册的后端
+                    for fallback_key in ("intent_classifier", "sentiment_analyzer", "entity_recognizer"):
+                        if torch_model_registry.is_registered(fallback_key) and task_name.startswith(fallback_key.replace("_", "").replace("analyzer", "").replace("classifier", "").replace("recognizer", "")):
+                            try:
+                                model = torch_model_registry.create(
+                                    fallback_key,
+                                    model_path=model_key,
+                                    device=settings.torch_device,
+                                    batch_size=task_cfg.batch_size,
+                                    **task_cfg.kwargs,
+                                )
+                                torch_models[task_name] = model
+                                break
+                            except Exception as exc:
+                                logger = __import__(
+                                    "rag_framework.core.logger", fromlist=["get_logger"]
+                                ).get_logger("rag.container")
+                                logger.warning(f"PyTorch 模型 fallback '{fallback_key}' 创建失败: {exc}")
+
         return cls(
             settings=settings,
             embedder=embedder,
@@ -217,6 +302,8 @@ class RAGContainer:
             domain=domain,
             rule_rewriter=rule_rewriter,
             llm_rewriter=llm_rewriter,
+            llamaindex_retriever=llamaindex_retriever,
+            torch_models=torch_models,
         )
 
     # ─── 快捷方法 ───────────────────────────────────────────────────────────────
@@ -274,4 +361,11 @@ class RAGContainer:
         for comp in (self.embedder, self.reranker, self.vector_store, self.llm, self.rewriter_llm):
             if isinstance(comp, Warmupable):
                 targets.append(comp)
+        # LlamaIndex Retriever 预热
+        if self.llamaindex_retriever is not None and isinstance(self.llamaindex_retriever, Warmupable):
+            targets.append(self.llamaindex_retriever)
+        # PyTorch 任务模型预热
+        for model in self.torch_models.values():
+            if isinstance(model, Warmupable):
+                targets.append(model)
         return targets
