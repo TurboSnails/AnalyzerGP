@@ -7,7 +7,7 @@ RAG 依赖注入容器
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 # ── 触发所有实现类的自注册 ──────────────────────────────────────────
 # 必须在导入 factories 之后、使用注册表之前，确保各后端已注册。
