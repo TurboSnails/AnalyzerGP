@@ -65,9 +65,13 @@ class ChromaVectorStore(VectorStore, Warmupable):
         collection_name: str,
         n_results: int = 10,
         max_distance: float = 1.3,
+        where: dict | None = None,
     ) -> tuple[list[str], list[float], list[dict]]:
         """
         向量查询。
+
+        Args:
+            where: ChromaDB where 过滤条件，例如 {"domain": {"$eq": "android"}}
 
         Returns:
             (ids, distances, metadatas)
@@ -77,7 +81,11 @@ class ChromaVectorStore(VectorStore, Warmupable):
             raise CollectionNotFoundError(f"Collection '{collection_name}' 未找到")
 
         q_emb = self._embedder.encode([query])
-        result = col.query(query_embeddings=q_emb, n_results=n_results)
+        result = col.query(
+            query_embeddings=q_emb,
+            n_results=n_results,
+            where=where,
+        )
         ids = result["ids"][0] if result["ids"] else []
         distances = result["distances"][0] if result.get("distances") else []
         metas = result["metadatas"][0] if result.get("metadatas") else []

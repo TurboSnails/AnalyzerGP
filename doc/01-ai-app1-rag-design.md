@@ -1,14 +1,16 @@
-# ai_app1 - Android RAG 问答系统设计文档
+# ai_app1 - 多领域 RAG 问答系统设计文档
 
-> 版本: 3.3 | 最后更新: 2026-05-15
+> 版本: 3.4 | 最后更新: 2026-05-16
 
 ---
 
 ## 1. 系统定位
 
-ai_app1 是一个面向 Android 开发者的 **智能问答助手**，基于 RAG (Retrieval-Augmented Generation) 架构构建。系统将《Android 开发核心注意事项与避坑指南》作为知识源，通过多路混合检索为本地 Qwen2.5 或远程 MiniMax-M2.7 等大模型提供精准上下文，回答 Android 开发中的各类技术问题。
+ai_app1 是一个支持 **多领域** 的 **智能问答助手**，基于 RAG (Retrieval-Augmented Generation) 架构构建。系统可同时加载多个 DomainPlugin（如 Android 开发、MS MARCO 通用英文问答等），通过统一的知识库 collection + `domain` 元数据过滤实现领域隔离，为本地 Qwen2.5 或远程 MiniMax-M2.7 等大模型提供精准上下文。
 
-**v3.3 核心变化**：新增完整的评测与可观测性体系 - Query 自动分类统计、Rewrite/Rerank 效果量化评测、Retrieval Trace 全链路追踪、Latency Breakdown 延迟拆解、Failure Analysis 失败分析闭环、Comprehensive Eval 综合调度器。HybridRetriever 和 SessionManager 已内嵌 Trace 记录与失败样本自动收集。
+**v3.4 核心变化**：统一 Collection 架构 — 所有领域数据写入同一个 `knowledge_base` collection，通过 `domain` metadata 字段实现领域隔离检索，无需为每个领域维护独立 collection 和 BM25 索引。新增多领域容器并发加载、自动路由（中文→android，英文→默认）、跨领域融合（`domain: "all"`）能力。
+
+**v3.3 回顾**：新增完整的评测与可观测性体系 - Query 自动分类统计、Rewrite/Rerank 效果量化评测、Retrieval Trace 全链路追踪、Latency Breakdown 延迟拆解、Failure Analysis 失败分析闭环、Comprehensive Eval 综合调度器。HybridRetriever 和 SessionManager 已内嵌 Trace 记录与失败样本自动收集。
 
 > **v3.2 回顾**：引入工厂注册表（`rag_framework/core/factories.py`）+ 生命周期协议（`Warmupable`/`Closable`），实现组件热插拔；`RAGContainer` 改为不可变 dataclass；移除所有 import-time 副作用，领域插件改为 lifespan 显式注册；API 层零全局状态，通过 FastAPI `Depends` 注入容器。
 
@@ -20,18 +22,19 @@ ai_app1 是一个面向 Android 开发者的 **智能问答助手**，基于 RAG
 ┌─────────────────────────────────────────────────────────┐
 │            应用层 (ai_app1/)                              │
 │   main.py + api/chat.py  →  FastAPI HTTP 路由            │
-│   职责：lifespan 显式注册领域、容器组装、协议化预热/关闭     │
+│   职责：lifespan 显式注册多领域、创建共享容器、协议化预热     │
 └─────────────────────────┬───────────────────────────────┘
-                          │  import rag_framework
-                          ▼
+                           │  import rag_framework
+                           ▼
 ┌─────────────────────────────────────────────────────────┐
-│          领域插件层 (domains/android/)                     │
-│   AndroidDomainPlugin  →  Android 领域知识的策略集合       │
+│          领域插件层 (domains/*/)                           │
+│   AndroidDomainPlugin / MSMarcoDomainPlugin              │
 │   职责：集合命名、术语词典、查询路由规则、HyDE Prompt        │
 │   特点：import-time 零副作用，由 lifespan 显式注册           │
+│   统一 collection：knowledge_base（通过 metadata.domain 隔离）│
 └─────────────────────────┬───────────────────────────────┘
-                          │  implement DomainPlugin
-                          ▼
+                           │  implement DomainPlugin
+                           ▼
 ┌─────────────────────────────────────────────────────────┐
 │        框架层 (rag_framework/ — 可安装 Python 包)          │
 │   RAGContainer(frozen) · SessionManager · HybridRetriever│
@@ -39,43 +42,49 @@ ai_app1 是一个面向 Android 开发者的 **智能问答助手**，基于 RAG
 │   QueryRewriter · OpenAILLMClient / LocalLLMClient      │
 │   ChromaVectorStore · BM25Store · Factories / Lifecycle │
 │   职责：通用 RAG 管道 + 可插拔组件注册表 + 生命周期协议      │
+│   新增：DenseStore.where 过滤、BM25Store.domain 字段、     │
+│         HybridRetriever.domain_filter 领域隔离检索         │
 └─────────────────────────────────────────────────────────┘
 ```
 
 ### 2.1 目录结构
 
 ```
-fenxiCB/
-├── rag_framework/                  # 框架包源码
-│   └── rag_framework/
-│       ├── container.py            # RAGContainer — 不可变依赖注入总控
-│       ├── core/
-│       │   ├── config.py           # RAGSettings（纯配置，去路径化）
-│       │   ├── factories.py        # 组件工厂注册表（热插拔）
-│       │   ├── lifecycle.py        # Warmupable / Closable 协议
-│       │   ├── registry.py         # 领域插件注册表
-│       │   ├── logger.py           # 结构化日志
-│       │   └── exceptions.py       # 异常基类
-│       ├── domain/base.py          # DomainPlugin 抽象基类
-│       ├── embedding/              # STEmbedder + 自注册工厂
-│       ├── indexing/               # VectorIndexer / chunker / hyde
-│       ├── llm/                    # OpenAILLMClient / LocalLLMClient / tool_registry
-│       ├── rerank/                 # CrossEncoderReranker / FallbackReranker
-│       ├── retrieval/              # ChromaVectorStore / HybridRetriever / BM25Store
-│       │   └── query_rewriter/     # Rule / LLM / Qwen Rewriter
-│       ├── session/                # SessionManager / memory_store
-│       └── eval/                   # 评测框架
-├── domains/android/
-│   ├── android_domain/plugin.py    # AndroidDomainPlugin（无 import-time 注册）
-│   └── scripts/
-│       ├── init_vector_db_v2.py    # 生产索引脚本
-│       └── init_vector_db.py       # V1（已废弃）
-├── ai_app1/                        # 薄应用层
-│   ├── main.py                     # FastAPI app + lifespan（协议化预热）
-│   ├── api/chat.py                 # /chat 路由 + Depends 注入容器
-│   ├── scripts/                    # 模型下载辅助脚本
-│   └── tests/test_api.py           # API 端到端测试（直接注入 mock 容器）
-└── doc/
+ fenxiCB/
+ ├── rag_framework/                  # 框架包源码
+ │   └── rag_framework/
+ │       ├── container.py            # RAGContainer — 不可变依赖注入总控
+ │       ├── core/
+ │       │   ├── config.py           # RAGSettings（纯配置，去路径化）
+ │       │   ├── factories.py        # 组件工厂注册表（热插拔）
+ │       │   ├── lifecycle.py        # Warmupable / Closable 协议
+ │       │   ├── registry.py         # 领域插件注册表
+ │       │   ├── logger.py           # 结构化日志
+ │       │   └── exceptions.py       # 异常基类
+ │       ├── domain/base.py          # DomainPlugin 抽象基类
+ │       ├── embedding/              # STEmbedder + 自注册工厂
+ │       ├── indexing/               # VectorIndexer / chunker / hyde
+ │       ├── llm/                    # OpenAILLMClient / LocalLLMClient / tool_registry
+ │       ├── rerank/                 # CrossEncoderReranker / FallbackReranker
+ │       ├── retrieval/              # ChromaVectorStore / HybridRetriever / BM25Store
+ │       │   └── query_rewriter/     # Rule / LLM / Qwen Rewriter
+ │       ├── session/                # SessionManager / memory_store
+ │       └── eval/                   # 评测框架
+ ├── domains/android/
+ │   ├── android_domain/plugin.py    # AndroidDomainPlugin（无 import-time 注册）
+ │   └── scripts/
+ │       ├── init_vector_db_v2.py    # 生产索引脚本
+ │       └── init_vector_db.py       # V1（已废弃）
+ ├── domains/msmarco/
+ │   ├── msmarco_domain/plugin.py    # MSMarcoDomainPlugin（英文问答领域）
+ │   └── scripts/
+ │       └── download_and_index.py   # SQuAD → 统一 knowledge_base 索引
+ ├── ai_app1/                        # 薄应用层
+ │   ├── main.py                     # FastAPI app + lifespan（多领域容器组装）
+ │   ├── api/chat.py                 # /chat 路由 + 单领域/跨领域融合
+ │   ├── scripts/                    # 模型下载辅助脚本
+ │   └── tests/test_api.py           # API 端到端测试（lifespan 后注入 mock）
+ └── doc/
 ```
 
 ---
@@ -241,9 +250,11 @@ class DomainPlugin(ABC):
 **AndroidDomainPlugin 策略**（`domains/android/android_domain/plugin.py`）：
 
 - `classify_query`：检测 Android 组件名（Activity、Fragment、RecyclerView 等）、camelCase、异常命名等代码模式
-- `get_collection_names`：`android_parent` / `android_child` / `android_hyde`
+- `get_collection_names`：`knowledge_base` / `knowledge_base_child` / `knowledge_base_hyde`
 - `get_term_mapping`：~25 个高频中文技术词 → 英文 keyword（内存泄漏→memory leak、卡顿→ANR jank 等）
 - `rewrite_router_rules`：L0 passthrough / L1 规则扩展 / L2 LLM 重写分级逻辑
+
+> **v3.4 统一 Collection**：所有领域共用同一组 collection（`knowledge_base` / `knowledge_base_child` / `knowledge_base_hyde`），领域隔离通过 metadata 中的 `"domain": "android"` 或 `"domain": "msmarco"` 实现，检索时通过 `where={"domain": {"$eq": "..."}}`（dense）或 `+domain:...`（BM25）过滤。
 
 > **去副作用化**：模块底部不再执行 `register_domain(AndroidDomainPlugin)`，改为 `ai_app1/main.py` lifespan 中显式注册。
 
@@ -407,13 +418,16 @@ jieba.cut(text) → 空格连接 token 串 → Tantivy whitespace 分词器 → 
 | BM25 计算 | Rust（~10× Python 速度） |
 | 持久化 | 磁盘（`tantivy_bm25/`） |
 
-**Schema 设计：**
+**Schema 设计（v3.4 新增 `domain` 字段）：**
 
 ```python
 doc_id   : TEXT, stored, tokenizer=raw        # 精确 ID 存取
 body     : TEXT, stored, tokenizer=whitespace  # jieba 预分词后存入
 raw_text : TEXT, stored, tokenizer=raw        # 原始文本，命中后返回
+domain   : TEXT, stored, tokenizer=raw        # 领域标记（"android"/"msmarco"/...）
 ```
+
+**统一索引构建**：`BM25Store._build_from_chroma()` 从 `knowledge_base` collection 全量拉取，自动读取每条文档 metadata 中的 `domain` 字段写入 tantivy。`add_documents()` 和 `search()` 均支持 `domain` 参数，实现增量写入和检索过滤。
 
 #### 3.6.3 查询扩写与路由 (QueryRewriter)
 
@@ -632,37 +646,105 @@ llm = llm_registry.create("local",
 #### 3.9.1 main.py — 生命周期管理
 
 ```python
+# 配置：要同时加载的领域插件
+_DOMAIN_CLASSES = []
+try:
+    from msmarco_domain.plugin import MSMarcoDomainPlugin
+    _DOMAIN_CLASSES.append(MSMarcoDomainPlugin)
+except Exception:
+    pass
+try:
+    from android_domain.plugin import AndroidDomainPlugin
+    _DOMAIN_CLASSES.append(AndroidDomainPlugin)
+except Exception:
+    pass
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    from android_domain.plugin import AndroidDomainPlugin
-    from rag_framework.core.registry import register_domain
+    from rag_framework.core.registry import register_domain, get_domain, list_domains
+    from rag_framework.core.factories import retriever_registry, session_store_registry
+    from rag_framework.retrieval.sparse import BM25Store
 
-    # 1. 显式注册领域插件（去 import-time 副作用）
-    register_domain(AndroidDomainPlugin)
+    # 1. 显式注册所有领域插件（去 import-time 副作用）
+    for cls in _DOMAIN_CLASSES:
+        register_domain(cls)
+    registered = list_domains()
 
-    # 2. 创建容器（若测试已注入则复用）
-    container = getattr(app.state, "container", None)
-    if container is None:
-        container = RAGContainer.from_settings(RAGSettings())
-        app.state.container = container
+    # 2. 确定默认激活领域
+    default_domain = os.getenv("RAG_ACTIVE_DOMAIN", registered[0])
+    if default_domain not in registered:
+        default_domain = registered[0]
 
-    # 3. 并发预热所有 Warmupable 组件
+    # 3. 创建基础容器（共享重型组件）
+    base_settings = RAGSettings()
+    base_settings = base_settings.model_copy(update={"active_domain": default_domain})
+    base_container = RAGContainer.from_settings(base_settings)
+
+    # 4. 创建共享 BM25Store（统一索引，所有领域共用）
+    shared_bm25 = BM25Store(
+        index_dir=base_settings.bm25_index_dir,
+        chroma_path=base_settings.chroma_db_path,
+        collection_name="knowledge_base",
+    )
+
+    # 5. 为每个领域创建派生容器
+    #    共享 embedder / vector_store / llm / reranker / bm25
+    #    独立 session_store / retriever（带各自的 domain_filter）
+    from dataclasses import replace
+    containers: dict[str, RAGContainer] = {}
+    for name in registered:
+        domain_settings = base_settings.model_copy(update={"active_domain": name})
+        domain = get_domain(name)
+        retriever = retriever_registry.create(
+            domain_settings.retriever_backend,
+            settings=domain_settings,
+            embedder=base_container.embedder,
+            vector_store=base_container.vector_store,
+            reranker=base_container.reranker,
+            domain=domain,
+            sparse_store=shared_bm25,
+            domain_filter=domain.name if domain else "",
+        )
+        session_store = session_store_registry.create(
+            domain_settings.session_store_backend,
+            default_budget=domain_settings.default_token_budget,
+        )
+        containers[name] = replace(
+            base_container,
+            settings=domain_settings,
+            domain=domain,
+            retriever=retriever,
+            session_store=session_store,
+        )
+
+    app.state.containers = containers
+    app.state.container = containers.get(default_domain)  # 兼容旧代码
+
+    # 6. 并发预热所有 Warmupable 组件（按对象 id 去重）
+    seen_ids: set[int] = set()
     warmup_tasks = []
-    for comp in container.warmup_targets():
-        warmup_tasks.append(comp.warmup())
+    for c in containers.values():
+        for comp in c.warmup_targets():
+            cid = id(comp)
+            if cid not in seen_ids:
+                seen_ids.add(cid)
+                warmup_tasks.append(comp.warmup())
     if warmup_tasks:
         await asyncio.gather(*warmup_tasks)
-    print("[startup] 所有模型和索引预热完成")
+    print(f"[startup] 已加载领域: {list(containers.keys())}")
     yield
 
-    # 4. shutdown：关闭所有 Closable 组件
-    for comp in (container.embedder, container.reranker,
-                 container.vector_store, container.llm):
-        if isinstance(comp, Closable):
-            try:
-                await comp.shutdown()
-            except Exception as e:
-                print(f"[shutdown] 关闭组件出错: {e}")
+    # 7. shutdown：关闭所有 Closable 组件（按对象 id 去重）
+    seen_ids = set()
+    for c in containers.values():
+        for comp in (c.embedder, c.reranker, c.vector_store, c.llm):
+            cid = id(comp)
+            if cid not in seen_ids and isinstance(comp, Closable):
+                seen_ids.add(cid)
+                try:
+                    await comp.shutdown()
+                except Exception as e:
+                    print(f"[shutdown] 关闭组件出错: {e}")
 ```
 
 #### 3.9.2 api/chat.py — HTTP 接入
@@ -671,19 +753,93 @@ async def lifespan(app: FastAPI):
 class ChatRequest(BaseModel):
     message: str
     user_id: str = "default_user"
+    domain: str = ""  # "msmarco", "android", "all", 空字符串自动路由
 
-def get_container(request: Request) -> RAGContainer:
-    """从 app.state 读取容器（由 lifespan 注入），测试时可直接替换。"""
-    container = getattr(request.app.state, "container", None)
-    if container is None:
-        raise RuntimeError("RAGContainer 未初始化，请检查 lifespan")
-    return container
+def _resolve_single_container(
+    containers: dict[str, RAGContainer],
+    default_container: RAGContainer,
+    domain: str,
+    query: str = "",
+) -> RAGContainer:
+    """单领域容器解析：显式指定 > 自动路由（中文→android）> 默认"""
+    if domain and domain in containers:
+        return containers[domain]
+    if query and any("\u4e00" <= ch <= "\u9fff" for ch in query):
+        android = containers.get("android")
+        if android is not None:
+            return android
+    return default_container
+
+async def _retrieve_from_domain(
+    container: RAGContainer, query: str, user_id: str
+) -> list[RetrievedDoc]:
+    session = container.session_store.get(user_id)
+    routes = container.build_routes(query, session.history)
+    result = await container.retriever.retrieve(routes)
+    return result.docs
+
+async def _multi_domain_chat_stream(
+    containers: dict[str, RAGContainer],
+    default_container: RAGContainer,
+    query: str,
+    user_id: str,
+):
+    """多领域融合：并行检索所有领域，合并去重后由默认领域 LLM 生成回答。"""
+    tasks = [_retrieve_from_domain(c, query, user_id) for c in containers.values()]
+    all_docs_per_domain = await asyncio.gather(*tasks)
+
+    seen: set[str] = set()
+    merged: list[RetrievedDoc] = []
+    for docs in all_docs_per_domain:
+        for d in docs:
+            if d.id not in seen:
+                seen.add(d.id)
+                merged.append(d)
+
+    if not merged:
+        yield "未检索到任何相关文档，请尝试更换关键词。"
+        return
+
+    merged.sort(key=lambda x: x.score, reverse=True)
+    top_docs = merged[:6]
+
+    session = default_container.session_store.get(user_id)
+    messages = [
+        {"role": "system", "content": default_container.domain.system_prompt},
+        *session.history,
+    ]
+    context = "\n\n".join(f"[{i+1}] {d.text}" for i, d in enumerate(top_docs))
+    messages.append({"role": "user", "content": f"参考资料：\n{context}\n\n问题：{query}"})
+
+    full_reply = ""
+    async for chunk in default_container.llm.chat_stream(messages, use_tools=False):
+        full_reply += chunk
+        yield chunk
+
+    session.history.append({"role": "user", "content": query})
+    session.history.append({"role": "assistant", "content": full_reply})
+    default_container.session_store.save(session)
 
 @router.post("/chat")
-async def chat(req: ChatRequest, container: RAGContainer = Depends(get_container)):
+async def chat(req: ChatRequest, request: Request):
+    containers = getattr(request.app.state, "containers", {}) or {}
+    default_container = getattr(request.app.state, "container", None)
+    if not containers and default_container is not None:
+        containers = {"default": default_container}  # 兼容旧测试
+    if not containers or default_container is None:
+        raise RuntimeError("RAGContainer 未初始化，请检查 lifespan")
+
+    is_multi_domain = req.domain.strip().lower() == "all"
+    if is_multi_domain:
+        stream = _multi_domain_chat_stream(containers, default_container, req.message, req.user_id)
+    else:
+        container = _resolve_single_container(containers, default_container, req.domain, req.message)
+        stream = container.chat_stream(req.message, req.user_id)
+
     async def content_generator():
-        async for chunk in container.chat_stream(req.message, req.user_id):
-            yield chunk
+        async for chunk in stream:
+            if chunk:
+                yield chunk
     return StreamingResponse(content_generator(), media_type="text/event-stream")
 ```
 
@@ -691,7 +847,19 @@ async def chat(req: ChatRequest, container: RAGContainer = Depends(get_container
 
 - pytest 9.0.3 + pytest-asyncio 1.3.0
 - 7 个测试函数：健康检查、SSE 流式、输入校验、用户隔离、CORS
-- `unittest.mock.patch("ai_app1.api.chat.get_container")` 隔离 RAGContainer
+- **关键技巧**：`TestClient` 会触发 lifespan，导致真实模型加载并覆盖测试注入的 mock 容器。因此在 `with TestClient(...)` 上下文**内部**再注入 mock，确保 lifespan 执行完成后覆盖：
+
+```python
+@pytest.fixture
+def client():
+    from ai_app1.main import app
+    with TestClient(app, raise_server_exceptions=True) as c:
+        # lifespan 已执行完毕，现在覆盖为纯内存 mock
+        app.state.container = build_test_container()
+        app.state.containers = {"default": app.state.container}
+        yield c
+```
+
 - 无外部依赖，可在 CI 中运行
 
 ```bash
@@ -945,35 +1113,39 @@ python -m rag_framework.eval.comprehensive_eval rewrite --dataset domains/androi
 
 ```mermaid
 flowchart TD
-    A[用户提问 POST /chat] --> B[chat.py 路由层]
-    B --> C[get_container 依赖注入]
-    C --> D[SessionManager.chat_stream]
-    D --> E[获取/创建 SessionData]
-    E --> F[用户消息入 history]
-    F --> G[AndroidDomainPlugin.rewrite_router_rules<br/>L0/L1/L2 分流]
-    G --> H{扩写级别}
-    H -->|L0| I1[原始 query × 1]
-    H -->|L1| I2[RuleQueryRewriter<br/>词典扩展 2条]
-    H -->|L2| I3[QwenQueryRewriter<br/>本地 Qwen 生成 2~3条]
-    I1 & I2 & I3 --> J[asyncio.to_thread → HybridRetriever]
-    J --> K{ThreadPoolExecutor 3路并发}
-    K --> K1[Dense: child→parent 回溯]
-    K --> K2[HyDE: hyde→parent 回溯]
-    K --> K3[BM25: Tantivy 磁盘检索]
-    K1 & K2 & K3 --> L[Weighted RRF 融合]
-    L --> M[CrossEncoderReranker 精排<br/>ce × 0.75 + rrf × 0.25]
-    M --> N[Lost-in-Middle 重排]
-    N --> O{top_ce ≥ 0.30?}
-    O -->|是| P[build_messages: 参考资料]
-    O -->|否| Q[build_messages: 拒答指令]
-    P & Q --> R[stream_run_agent 流式调用 MiniMax]
-    R --> S[StreamingResponse 逐 token 返回]
-    S --> T[流结束 → create_task 后台维护]
-    T --> U[add_assistant_message]
-    U --> V{should_summarize?}
-    V -->|是| W[chat summarize → update_summary]
-    V -->|否| X[trim_history 保留最近4条]
-    W --> X
+    A[用户提问 POST /chat<br/>含可选 domain 字段] --> B[chat.py 路由层]
+    B --> C{domain == "all"?}
+    C -->|是| D1[并行检索所有领域]
+    C -->|否| D2[_resolve_single_container<br/>显式 > 中文→android > 默认]
+    D1 --> E1[_multi_domain_chat_stream]
+    D2 --> E2[SessionManager.chat_stream]
+    E1 --> F[获取/创建 SessionData]
+    E2 --> F
+    F --> G[用户消息入 history]
+    G --> H[DomainPlugin.rewrite_router_rules<br/>L0/L1/L2 分流]
+    H --> I{扩写级别}
+    I -->|L0| J1[原始 query × 1]
+    I -->|L1| J2[RuleQueryRewriter<br/>词典扩展 2条]
+    I -->|L2| J3[QwenQueryRewriter<br/>本地 Qwen 生成 2~3条]
+    J1 & J2 & J3 --> K[asyncio.to_thread → HybridRetriever]
+    K --> L{ThreadPoolExecutor 3路并发}
+    L --> L1[Dense: child→parent 回溯<br/>where={"domain": {"$eq": "xxx"}}]
+    L --> L2[HyDE: hyde→parent 回溯<br/>同上 where 过滤]
+    L --> L3[BM25: Tantivy 磁盘检索<br/>boolean query +domain:xxx]
+    L1 & L2 & L3 --> M[Weighted RRF 融合]
+    M --> N[CrossEncoderReranker 精排<br/>ce × 0.75 + rrf × 0.25]
+    N --> O[Lost-in-Middle 重排]
+    O --> P{top_ce ≥ 0.30?}
+    P -->|是| Q[build_messages: 参考资料]
+    P -->|否| R[build_messages: 拒答指令]
+    Q & R --> S[stream_run_agent 流式调用 LLM]
+    S --> T[StreamingResponse 逐 token 返回]
+    T --> U[流结束 → create_task 后台维护]
+    U --> V[add_assistant_message]
+    V --> W{should_summarize?}
+    W -->|是| X[chat summarize → update_summary]
+    W -->|否| Y[trim_history 保留最近4条]
+    X --> Y
 ```
 
 ---
@@ -1007,18 +1179,19 @@ flowchart TD
 ### 6.1 首次部署
 
 ```bash
-# 1. 安装依赖（含 rag_framework 本地包）
+# 1. 安装依赖（含 rag_framework / android-domain / msmarco-domain 本地包）
 uv sync
 
 # 2. 配置环境变量
 cp ai_app1/.env.example ai_app1/.env
 # 编辑 .env: OPENAI_API_KEY=your_minimax_key
 
-# 3. 构建离线索引（生产 V2）
+# 3. 构建离线索引（所有领域写入统一 knowledge_base collection）
 uv run python -m domains.android.scripts.init_vector_db_v2
+uv run python -m domains.msmarco.scripts.download_and_index
 
 # 4. 启动服务（自动预热所有模型）
-uv run python -m ai_app1.main
+uv run python -m uvicorn ai_app1.main:app --host 0.0.0.0 --port 8000
 ```
 
 ### 6.2 开发调试
@@ -1037,9 +1210,20 @@ curl http://localhost:8000/debug/rewrite_cache
 ### 6.3 API 调用
 
 ```bash
+# 自动路由（中文→android）
 curl -X POST http://localhost:8000/chat \
   -H "Content-Type: application/json" \
   -d '{"message": "Android 中 Handler 内存泄漏怎么解决？"}'
+
+# 强制指定领域
+curl -X POST http://localhost:8000/chat \
+  -H "Content-Type: application/json" \
+  -d '{"message": "How many people live in Berlin?", "domain": "msmarco"}'
+
+# 跨领域融合
+curl -X POST http://localhost:8000/chat \
+  -H "Content-Type: application/json" \
+  -d '{"message": "compare Android and iOS", "domain": "all"}'
 ```
 
 ---
@@ -1051,6 +1235,8 @@ curl -X POST http://localhost:8000/chat \
 | 包结构 | rag_framework 独立可安装包 | 与 ai_app2/ai_app3 共用框架；隔离领域逻辑与通用逻辑 |
 | 领域知识 | DomainPlugin 插件系统 | 集合命名/术语词典/路由规则/HyDE Prompt 等领域特异性内容统一收敛，框架零耦合 |
 | DI 模式 | RAGContainer.from_settings() + FastAPI Depends | 一次组装，全请求复用；可测试（mock 注入） |
+| **多领域容器** | `dataclasses.replace()` 派生 + 对象 id 去重预热 | 共享重型组件（embedder/llm/reranker），独立 session/retriever；避免重复加载模型 |
+| **统一 Collection** | 所有领域写入 `knowledge_base`，`domain` metadata 隔离 | 无需为每个领域维护独立 collection 和 BM25 索引；ChromaDB `where` + Tantivy boolean query 实现运行时过滤；新增领域零索引脚本改动 |
 | Embedding | BGE-M3 (本地 STEmbedder) | 中文语义效果优、L2 normalize、显式编码便于缓存和换模型 |
 | 向量库 | ChromaDB | 本地持久化、零配置、Python 原生 |
 | LLM | MiniMax-M2.7（默认） | 中文能力强、OpenAI 格式兼容 |
@@ -1122,6 +1308,7 @@ curl -X POST http://localhost:8000/chat \
 
 | 版本 | 日期 | 变更内容 |
 |------|------|----------|
+| **v3.4** | **2026-05-16** | **统一 Collection 多领域架构**：所有领域数据写入 `knowledge_base` collection，`domain` metadata 隔离；`ChromaVectorStore.query()` 支持 `where` 过滤；`BM25Store` schema 新增 `domain` 字段，search/add 支持 domain 过滤；`HybridRetriever` 接受 `domain_filter` 并传递至 dense/BM25；工厂注册表透传 `domain_filter`；`AndroidDomainPlugin` / `MSMarcoDomainPlugin` 统一返回 `knowledge_base` 前缀集合名；`VectorIndexer` / `init_vector_db_v2` / `download_and_index` 自动写入 `domain` metadata；`ai_app1/main.py` 多领域并发加载：共享 embedder/vector_store/llm/reranker/bm25，独立 session_store/retriever（`replace()` 派生 + 对象 id 去重预热）；`ai_app1/api/chat.py` 支持 `domain="all"` 跨领域融合与自动路由（中文→android）；`test_api.py` fixture 在 lifespan 后注入 mock 容器 |
 | v3.3 | 2026-05-15 | **评测与可观测性体系**：`query_classifier.py` 自动分类 + 按类型统计 recall；`rewrite_eval.py` before/after 量化对比；`rerank_eval.py` CrossEncoder win/loss/hold 验证；`retrieval_trace.py` 检索全链路 Trace（已嵌入 `HybridRetriever`）；`latency_breakdown.py` PhaseTimer + 瓶颈自动识别；`failure_analysis.py` 失败样本收集 + JSON Lines 存储（已嵌入 `SessionManager`）；`comprehensive_eval.py` 一站式评测调度器；`eval/__init__.py` 统一导出 |
 | v3.1 | 2026-05-13 | **本地 Qwen 改写器**：新增 `QwenQueryRewriter`（Qwen2.5-1.5B-Instruct，懒加载，线程安全）；`container.py` 按 `rewriter_backend` 自动选择本地/远程改写器；`SessionManager._build_routes()` 加 Rewrite level 日志；`LLMQueryRewriter` / `RuleQueryRewriter` 加 model + 耗时 INFO 日志 |
 | v3.0 | 2026-05-13 | **三层架构重构**：rag_framework 独立包 + AndroidDomainPlugin + 薄应用层；删除 ai_app1 代理层；VectorIndexer 统一索引管道；RuleQueryRewriter / LLMQueryRewriter 提取为框架组件；FallbackReranker 独立组件；DenseStore 新增 get_or_create_collection；pytest 测试套件 |

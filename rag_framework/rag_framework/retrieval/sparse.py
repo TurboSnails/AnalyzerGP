@@ -34,11 +34,13 @@ class BM25Store:
         chroma_path: str,
         heap_size: int = 200 * 1024 * 1024,
         batch_size: int = 10_000,
+        collection_name: str = "knowledge_base",
     ) -> None:
         self._index_dir = index_dir
         self._chroma_path = chroma_path
         self._heap_size = heap_size
         self._batch_size = batch_size
+        self._collection_name = collection_name
         self._index: tantivy.Index | None = None
         self._searcher: tantivy.Searcher | None = None
         self._lock = threading.Lock()
@@ -49,6 +51,7 @@ class BM25Store:
         sb.add_text_field("doc_id", stored=True, tokenizer_name="raw")
         sb.add_text_field("body", stored=True, tokenizer_name="whitespace")
         sb.add_text_field("raw_text", stored=True, tokenizer_name="raw")
+        sb.add_text_field("domain", stored=True, tokenizer_name="raw")
         return sb.build()
 
     @staticmethod
@@ -69,7 +72,20 @@ class BM25Store:
 
             os.makedirs(self._index_dir, exist_ok=True)
             schema = self._make_schema()
-            idx = tantivy.Index(schema=schema, path=self._index_dir)
+
+            try:
+                idx = tantivy.Index(schema=schema, path=self._index_dir)
+            except Exception as e:
+                err_msg = str(e)
+                if "schema" in err_msg.lower() and "match" in err_msg.lower():
+                    logger.warning(
+                        f"BM25 索引 Schema 不匹配，自动重建: {e}"
+                    )
+                    shutil.rmtree(self._index_dir)
+                    os.makedirs(self._index_dir, exist_ok=True)
+                    idx = tantivy.Index(schema=schema, path=self._index_dir)
+                else:
+                    raise
 
             if idx.searcher().num_docs == 0:
                 if not self._build_from_chroma(idx):
@@ -82,12 +98,12 @@ class BM25Store:
             return True
 
     def _build_from_chroma(self, idx: tantivy.Index) -> bool:
-        """从 ChromaDB android_parent 分批拉取构建索引。"""
+        """从 ChromaDB 指定 collection 分批拉取构建索引。"""
         client = chromadb.PersistentClient(path=self._chroma_path)
         try:
-            col = client.get_collection("android_parent")
+            col = client.get_collection(self._collection_name)
         except Exception as e:
-            logger.warning(f"android_parent 未就绪，BM25 不可用: {e}")
+            logger.warning(f"{self._collection_name} 未就绪，BM25 不可用: {e}")
             return False
 
         total = col.count()
@@ -98,12 +114,20 @@ class BM25Store:
         offset = 0
 
         while offset < total:
-            batch = col.get(limit=self._batch_size, offset=offset, include=["documents"])
-            for doc_id, text in zip(batch["ids"], batch["documents"]):
+            batch = col.get(
+                limit=self._batch_size,
+                offset=offset,
+                include=["documents", "metadatas"],
+            )
+            for doc_id, text, meta in zip(
+                batch["ids"], batch["documents"], batch["metadatas"]
+            ):
+                domain = (meta or {}).get("domain", "")
                 writer.add_document(tantivy.Document(
                     doc_id=doc_id,
                     body=self._tokenize(text),
                     raw_text=text,
+                    domain=domain,
                 ))
             indexed += len(batch["ids"])
             offset += self._batch_size
@@ -114,9 +138,14 @@ class BM25Store:
         logger.info(f"Tantivy BM25 索引构建完成：{indexed} 个文档")
         return True
 
-    def search(self, query: str, top_k: int = 10) -> list[tuple[str, str, float]]:
+    def search(
+        self, query: str, top_k: int = 10, domain: str | None = None
+    ) -> list[tuple[str, str, float]]:
         """
         BM25 全文检索。
+
+        Args:
+            domain: 若指定，仅检索该 domain 的文档
 
         Returns:
             [(parent_id, text, bm25_score), ...] 按分值降序
@@ -125,7 +154,12 @@ class BM25Store:
             return []
 
         tokenized = self._tokenize(query)
-        q = self._index.parse_query(tokenized, ["body"])
+        if domain:
+            q = self._index.parse_query(
+                f"+body:{tokenized} +domain:{domain}", ["body", "domain"]
+            )
+        else:
+            q = self._index.parse_query(tokenized, ["body"])
         hits = self._searcher.search(q, limit=top_k)
 
         results = [
@@ -134,12 +168,14 @@ class BM25Store:
             if (doc := self._searcher.doc(addr)) and score > 0
         ]
         logger.debug(
-            f"BM25 检索: query={query[:30]!r}, 命中={len(results)}, "
-            f"top_score={results[0][2] if results else 0.0:.3f}"
+            f"BM25 检索: query={query[:30]!r}, domain={domain}, "
+            f"命中={len(results)}, top_score={results[0][2] if results else 0.0:.3f}"
         )
         return results
 
-    def add_documents(self, docs: list[tuple[str, str]]) -> None:
+    def add_documents(
+        self, docs: list[tuple[str, str]], domain: str = ""
+    ) -> None:
         """增量写入文档。"""
         if not self._ensure_loaded():
             return
@@ -150,6 +186,7 @@ class BM25Store:
                 doc_id=doc_id,
                 body=self._tokenize(text),
                 raw_text=text,
+                domain=domain,
             ))
         writer.commit()
         writer.wait_merging_threads()

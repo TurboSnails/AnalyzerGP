@@ -65,6 +65,7 @@ class HybridRetriever(Retriever):
         sparse_store: "BM25Store",
         reranker: Reranker,
         domain: DomainPlugin,
+        domain_filter: str = "",
     ) -> None:
         self._cfg = HybridConfig(
             rrf_k=settings.rrf_k,
@@ -82,6 +83,7 @@ class HybridRetriever(Retriever):
         self._sparse = sparse_store
         self._reranker = reranker
         self._domain = domain
+        self._domain_filter = domain_filter
 
     async def retrieve(
         self,
@@ -289,24 +291,37 @@ class HybridRetriever(Retriever):
         task_meta: list[tuple[str, float]] = []   # (kind, weight)
         coros: list = []
 
+        where = None
+        if self._domain_filter:
+            where = {"domain": {"$eq": self._domain_filter}}
+
         for q in queries:
             if "dense" in q.routes and self._cfg.enable_dense:
                 coros.append(asyncio.wait_for(
-                    asyncio.to_thread(self._query_dense, q.text, collections.child),
+                    asyncio.to_thread(
+                        self._query_dense, q.text, collections.child, where
+                    ),
                     timeout=self._cfg.branch_timeout,
                 ))
                 task_meta.append(("dense", q.weight))
 
             if "hyde" in q.routes and self._cfg.enable_hyde:
                 coros.append(asyncio.wait_for(
-                    asyncio.to_thread(self._query_dense, q.text, collections.hyde),
+                    asyncio.to_thread(
+                        self._query_dense, q.text, collections.hyde, where
+                    ),
                     timeout=self._cfg.branch_timeout,
                 ))
                 task_meta.append(("hyde", q.weight))
 
             if "bm25" in q.routes and self._cfg.enable_bm25:
                 coros.append(asyncio.wait_for(
-                    asyncio.to_thread(self._sparse.search, q.text, self._cfg.bm25_top_k),
+                    asyncio.to_thread(
+                        self._sparse.search,
+                        q.text,
+                        self._cfg.bm25_top_k,
+                        self._domain_filter,
+                    ),
                     timeout=self._cfg.branch_timeout,
                 ))
                 task_meta.append(("bm25", q.weight))
@@ -351,12 +366,17 @@ class HybridRetriever(Retriever):
 
     # ─── 同步子步骤（在线程中运行）────────────────────────────────────────────────
 
-    def _query_dense(self, query: str, collection_name: str) -> list[str]:
+    def _query_dense(
+        self, query: str, collection_name: str, where: dict | None = None
+    ) -> list[str]:
         """向量检索 → parent_id 聚合（同步，由 to_thread 调用）。"""
         try:
             ids, distances, metas = self._dense.query(
-                query, collection_name,
-                n_results=25, max_distance=self._cfg.max_child_distance,
+                query,
+                collection_name,
+                n_results=25,
+                max_distance=self._cfg.max_child_distance,
+                where=where,
             )
         except Exception:
             return []
@@ -428,6 +448,7 @@ def _create_hybrid_retriever(
     reranker: Reranker,
     domain: DomainPlugin,
     sparse_store: Any = None,
+    domain_filter: str = "",
 ) -> HybridRetriever:
     """创建 HybridRetriever，sparse_store 可选，默认自动创建 BM25。"""
     if sparse_store is None:
@@ -435,6 +456,7 @@ def _create_hybrid_retriever(
         sparse_store = BM25Store(
             index_dir=settings.bm25_index_dir,
             chroma_path=settings.chroma_db_path,
+            collection_name=domain.get_collection_names().parent,
         )
     return HybridRetriever(
         settings=settings,
@@ -443,6 +465,7 @@ def _create_hybrid_retriever(
         sparse_store=sparse_store,
         reranker=reranker,
         domain=domain,
+        domain_filter=domain_filter,
     )
 
 

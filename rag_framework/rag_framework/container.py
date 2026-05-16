@@ -184,6 +184,7 @@ class RAGContainer:
             vector_store=vector_store,
             reranker=reranker,
             domain=domain,
+            domain_filter=domain.name if domain else "",
         )
 
         return cls(

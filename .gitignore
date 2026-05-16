@@ -72,3 +72,4 @@ pre/tantivy_bm25/
 rag_framework/pre/
 rag_framework/pre/chroma_db/
 rag_framework/pre/tantivy_bm25/
+/ai_app1/data/msmarco_bm25/

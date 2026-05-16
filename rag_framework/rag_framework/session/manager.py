@@ -153,6 +153,18 @@ class SessionManager:
 
         # 2. 异步多路检索
         result = await self._retriever.retrieve(routes)
+
+        # ── 打印检索到的片段内容 ──────────────────────────────────────────────
+        if result.docs:
+            for idx, doc in enumerate(result.docs):
+                session_logger.info(
+                    f"[检索片段 {idx}] id={doc.id!r} source={doc.source!r} "
+                    f"score={doc.score:.4f}\n{doc.text}"
+                )
+        else:
+            session_logger.info("[检索片段] 未检索到任何文档")
+        # ─────────────────────────────────────────────────────────────────────
+
         context = "\n\n".join(d.text for d in result.docs) if result.docs else ""
         top_ce = result.metadata.get("top_ce", 0.0)
         n_chunks = len(result.docs)

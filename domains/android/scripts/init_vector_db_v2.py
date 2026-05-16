@@ -36,6 +36,7 @@ from rag_framework.core.config import get_settings
 from rag_framework.core.logger import get_logger, setup_logging
 from rag_framework.embedding.sentence_transformer import STEmbedder
 from rag_framework.indexing.indexer import IndexConfig, VectorIndexer
+from rag_framework.llm.local_client import LocalLLMClient
 from rag_framework.llm.openai_client import OpenAILLMClient
 from rag_framework.retrieval.dense import DenseStore
 from rag_framework.retrieval.sparse import BM25Store
@@ -98,6 +99,10 @@ def main() -> None:
         if db_path.exists():
             shutil.rmtree(db_path)
             _logger.info(f"已清空向量数据库: {db_path}")
+        bm25_path = Path(settings.bm25_index_dir)
+        if bm25_path.exists():
+            shutil.rmtree(bm25_path)
+            _logger.info(f"已清空 BM25 索引: {bm25_path}")
 
     # 初始化组件
     embedder = STEmbedder(
@@ -112,12 +117,21 @@ def main() -> None:
         index_dir=settings.bm25_index_dir,
         chroma_path=settings.chroma_db_path,
     )
-    llm = OpenAILLMClient(
-        base_url=settings.llm_base_url,
-        api_key=settings.resolved_llm_api_key,
-        model=settings.llm_model,
-        backend=settings.llm_backend,
-    )
+    if settings.llm_backend == "local":
+        llm = LocalLLMClient(
+            model_path=settings.llm_local_model_path,
+            max_tokens=settings.llm_max_tokens,
+            max_concurrent=settings.llm_max_concurrent,
+        )
+    else:
+        llm = OpenAILLMClient(
+            base_url=settings.llm_base_url,
+            api_key=settings.resolved_llm_api_key,
+            model=settings.llm_model,
+            backend=settings.llm_backend,
+            max_tokens=settings.llm_max_tokens,
+            max_concurrent=settings.llm_max_concurrent,
+        )
     domain = AndroidDomainPlugin()
 
     cfg = IndexConfig(
@@ -125,7 +139,7 @@ def main() -> None:
         overlap=100,
         child_chunk_size=128,
         child_overlap=25,
-        hyde_batch_size=8,
+        hyde_batch_size=4,
         enable_child=True,
         enable_hyde=not args.no_hyde,
         enable_bm25=True,

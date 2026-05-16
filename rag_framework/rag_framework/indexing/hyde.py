@@ -21,7 +21,8 @@ async def generate_hyde_questions(
     chunks: list[str],
     domain: DomainPlugin,
     llm: LLMClient,
-    batch_size: int = 8,
+    batch_size: int = 4,
+    max_retries: int = 2,
     on_progress: Callable[[int, int], None] | None = None,
 ) -> list[str]:
     """
@@ -31,7 +32,8 @@ async def generate_hyde_questions(
         chunks: 文档片段列表
         domain: 领域插件（提供 hyde prompt 模板）
         llm: LLM 客户端
-        batch_size: 并发批次大小（控制 LLM 并发压力）
+        batch_size: 并发批次大小（控制 LLM 并发压力，默认 4 与 LLM max_concurrent=3 匹配）
+        max_retries: 单条失败时的最大重试次数
         on_progress: 进度回调 (done, total)
 
     Returns:
@@ -42,7 +44,7 @@ async def generate_hyde_questions(
 
     for start in range(0, total, batch_size):
         batch = chunks[start: start + batch_size]
-        tasks = [_generate_one(chunk, domain, llm) for chunk in batch]
+        tasks = [_generate_one(chunk, domain, llm, max_retries) for chunk in batch]
         batch_results = await asyncio.gather(*tasks, return_exceptions=True)
 
         for i, r in enumerate(batch_results):
@@ -61,6 +63,20 @@ async def generate_hyde_questions(
     return results
 
 
-async def _generate_one(chunk: str, domain: DomainPlugin, llm: LLMClient) -> str:
+async def _generate_one(
+    chunk: str, domain: DomainPlugin, llm: LLMClient, max_retries: int = 2
+) -> str:
     prompt = domain.get_hyde_prompt(chunk)
-    return await llm.chat([{"role": "user", "content": prompt}])
+    last_error: Exception | None = None
+    for attempt in range(max_retries + 1):
+        try:
+            return await llm.chat([{"role": "user", "content": prompt}])
+        except Exception as e:
+            last_error = e
+            if attempt < max_retries:
+                wait = 2 ** attempt
+                _logger.warning(
+                    f"HyDE 生成异常，{wait}s 后重试 (attempt {attempt + 1}/{max_retries + 1}): {e}"
+                )
+                await asyncio.sleep(wait)
+    raise last_error

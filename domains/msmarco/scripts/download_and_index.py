@@ -46,6 +46,7 @@ from rag_framework.core.config import get_settings
 from rag_framework.core.logger import get_logger, setup_logging
 from rag_framework.embedding.sentence_transformer import STEmbedder
 from rag_framework.indexing.hyde import generate_hyde_questions
+from rag_framework.llm.local_client import LocalLLMClient
 from rag_framework.llm.openai_client import OpenAILLMClient
 from rag_framework.retrieval.dense import DenseStore
 from rag_framework.retrieval.sparse import BM25Store
@@ -95,9 +96,10 @@ def _load_unique_passages(split: str) -> tuple[list[str], list[str], list[dict]]
         ids.append(pid)
         texts.append(ctx)
         metadatas.append({
-            "parent_id": pid,        # 供 _query_dense 的 parent_id 聚合
+            "parent_id": pid,
             "source": row["title"],
             "title": row["title"],
+            "domain": "msmarco",
         })
 
     _logger.info(f"唯一段落数: {len(ids)}（原始 QA: {len(ds)} 条）")
@@ -130,22 +132,43 @@ def _index_bm25(sparse_store, ids, texts) -> None:
     _logger.info(f"写入 BM25Store，共 {total} 条...")
     for start in range(0, total, _BM25_BATCH):
         end = min(start + _BM25_BATCH, total)
-        sparse_store.add_documents(list(zip(ids[start:end], texts[start:end])))
+        sparse_store.add_documents(
+            list(zip(ids[start:end], texts[start:end])), domain="msmarco"
+        )
         _logger.info(f"  BM25: {end}/{total}")
 
 
 # ─── HyDE 索引 ───────────────────────────────────────────────────────────────
+
+async def _check_llm_connectivity(domain, llm) -> bool:
+    """尝试一次 LLM 调用，返回 True 表示可用。"""
+    try:
+        prompt = domain.get_hyde_prompt("connectivity check")
+        await llm.chat([{"role": "user", "content": prompt}])
+        return True
+    except Exception as e:
+        _logger.warning(f"LLM 连接检查失败: {e}")
+        return False
+
 
 def _index_hyde(hyde_col, embedder, domain, llm, ids, texts, hyde_sample) -> None:
     sample_ids   = ids[:hyde_sample]
     sample_texts = texts[:hyde_sample]
     _logger.info(f"生成 HyDE 问题，共 {len(sample_ids)} 条段落...")
 
+    # 在同一个事件循环中完成连通性检查和 HyDE 生成，
+    # 避免跨循环复用同一个 OpenAILLMClient（其内部的 Semaphore 与 httpx.AsyncClient
+    # 均绑定到创建时的事件循环，切换循环会导致 Connection error）。
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
+        reachable = loop.run_until_complete(_check_llm_connectivity(domain, llm))
+        if not reachable:
+            _logger.warning("LLM 服务不可达，跳过 HyDE 生成。请确认本地模型服务已启动，或使用 --no-hyde 跳过。")
+            return
+
         questions = loop.run_until_complete(
-            generate_hyde_questions(sample_texts, domain, llm, batch_size=8)
+            generate_hyde_questions(sample_texts, domain, llm, batch_size=4)
         )
     finally:
         loop.close()
@@ -156,7 +179,10 @@ def _index_hyde(hyde_col, embedder, domain, llm, ids, texts, hyde_sample) -> Non
         return
 
     hyde_texts, hyde_ids = zip(*valid)
-    hyde_metas = [{"parent_id": pid, "source": f"hyde_{pid}"} for pid in hyde_ids]
+    hyde_metas = [
+        {"parent_id": pid, "source": f"hyde_{pid}", "domain": "msmarco"}
+        for pid in hyde_ids
+    ]
 
     _logger.info(f"写入 HyDE collection，共 {len(valid)} 条...")
     for start in range(0, len(valid), _EMBED_BATCH):
@@ -196,6 +222,10 @@ def main() -> None:
         if db_path.exists():
             shutil.rmtree(db_path)
             _logger.info(f"已清空向量库: {db_path}")
+        bm25_path = Path(settings.bm25_index_dir)
+        if bm25_path.exists():
+            shutil.rmtree(bm25_path)
+            _logger.info(f"已清空 BM25 索引: {bm25_path}")
 
     embedder = STEmbedder(
         model_path=settings.embed_model_path,
@@ -217,12 +247,21 @@ def main() -> None:
     _index_bm25(sparse_store, ids, texts)
 
     if not args.no_hyde:
-        llm = OpenAILLMClient(
-            base_url=settings.llm_base_url,
-            api_key=settings.resolved_llm_api_key,
-            model=settings.llm_model,
-            backend=settings.llm_backend,
-        )
+        if settings.llm_backend == "local":
+            llm = LocalLLMClient(
+                model_path=settings.llm_local_model_path,
+                max_tokens=settings.llm_max_tokens,
+                max_concurrent=settings.llm_max_concurrent,
+            )
+        else:
+            llm = OpenAILLMClient(
+                base_url=settings.llm_base_url,
+                api_key=settings.resolved_llm_api_key,
+                model=settings.llm_model,
+                backend=settings.llm_backend,
+                max_tokens=settings.llm_max_tokens,
+                max_concurrent=settings.llm_max_concurrent,
+            )
         hyde_col = dense_store.get_or_create_collection(names.hyde)
         _index_hyde(
             hyde_col, embedder, domain, llm,

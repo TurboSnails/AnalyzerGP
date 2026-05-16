@@ -84,7 +84,7 @@ def check_imports() -> bool:
 
     try:
         from ai_app1.main import app  # noqa: F401
-        from ai_app1.api.chat import router, get_container, ChatRequest  # noqa: F401
+        from ai_app1.api.chat import router, ChatRequest  # noqa: F401
     except Exception as e:
         errors.append(f"ai_app1 导入失败: {e}")
 
@@ -124,9 +124,9 @@ def check_domain_plugin() -> bool:
         assert isinstance(plugin.system_prompt, str) and len(plugin.system_prompt) > 0
         collections = plugin.get_collection_names()
         assert isinstance(collections, CollectionNames)
-        assert collections.parent == "android_parent"
-        assert collections.child == "android_child"
-        assert collections.hyde == "android_hyde"
+        assert collections.parent == "knowledge_base"
+        assert collections.child == "knowledge_base_child"
+        assert collections.hyde == "knowledge_base_hyde"
         print("  [PASS] AndroidDomainPlugin 接口正确")
         return True
     except Exception as e:

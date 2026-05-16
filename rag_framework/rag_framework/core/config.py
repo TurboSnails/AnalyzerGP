@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Literal
 
 from dotenv import load_dotenv
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # 将传统 .env 文件加载进 os.environ，保证 os.getenv("OPENAI_API_KEY") 等兼容逻辑可用

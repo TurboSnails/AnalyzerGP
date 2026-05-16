@@ -51,9 +51,9 @@ class AndroidDomainPlugin(DomainPlugin):
 
     def get_collection_names(self) -> CollectionNames:
         return CollectionNames(
-            parent="android_parent",
-            child="android_child",
-            hyde="android_hyde",
+            parent="knowledge_base",
+            child="knowledge_base_child",
+            hyde="knowledge_base_hyde",
         )
 
     def classify_query(self, query: str, history: list[dict]) -> QueryRoute:

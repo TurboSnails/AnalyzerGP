@@ -39,13 +39,10 @@ class MSMarcoDomainPlugin(DomainPlugin):
         return DomainPrompts(system=self._system_prompt, hyde=self._hyde_template)
 
     def get_collection_names(self) -> CollectionNames:
-        # child = parent: MS MARCO passages are already short (~100 words),
-        # no sub-chunking needed. Reusing the same collection keeps v2 retrieval
-        # path active (dense + hyde + bm25) without wasting storage on duplicates.
         return CollectionNames(
-            parent="msmarco_passages",
-            child="msmarco_passages",
-            hyde="msmarco_hyde",
+            parent="knowledge_base",
+            child="knowledge_base",
+            hyde="knowledge_base_hyde",
         )
 
     def classify_query(self, query: str, history: list[dict]) -> QueryRoute:

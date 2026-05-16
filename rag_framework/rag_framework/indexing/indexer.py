@@ -34,7 +34,7 @@ class IndexConfig:
     overlap: int = 64
     child_chunk_size: int = 128
     child_overlap: int = 25
-    hyde_batch_size: int = 8
+    hyde_batch_size: int = 4
     enable_child: bool = True
     enable_hyde: bool = True
     enable_bm25: bool = True
@@ -138,7 +138,8 @@ class VectorIndexer:
 
         names = self._domain.get_collection_names()
         ids = [str(uuid.uuid4()) for _ in chunks]
-        metadatas = [{"source": s} for s in sources]
+        domain_name = getattr(self._domain, "name", "")
+        metadatas = [{"source": s, "domain": domain_name} for s in sources]
 
         # Dense (parent collection)
         try:
@@ -160,7 +161,7 @@ class VectorIndexer:
                 for c_idx, sub in enumerate(sub_chunks):
                     child_ids.append(f"{parent_id}_c{c_idx}")
                     child_texts.append(sub)
-                    child_metas.append({"parent_id": parent_id})
+                    child_metas.append({"parent_id": parent_id, "domain": domain_name})
             if child_texts:
                 try:
                     col = self._dense.get_or_create_collection(names.child)
@@ -181,7 +182,9 @@ class VectorIndexer:
         # BM25
         if self._cfg.enable_bm25 and self._sparse is not None:
             try:
-                self._sparse.add_documents(list(zip(ids, chunks)))
+                self._sparse.add_documents(
+                    list(zip(ids, chunks)), domain=domain_name
+                )
                 _logger.info(f"BM25 写入 {len(chunks)} 条")
             except Exception as e:
                 stats.errors.append(f"bm25: {e}")
@@ -235,10 +238,11 @@ class VectorIndexer:
         try:
             col = self._dense.get_or_create_collection(hyde_collection)
             embeddings = self._embedder.encode(list(hyde_texts))
+            hyde_domain = getattr(self._domain, "name", "")
             col.add(
                 ids=list(hyde_ids),
                 documents=list(hyde_texts),
-                metadatas=[{"source": s} for s in hyde_srcs],
+                metadatas=[{"source": s, "domain": hyde_domain} for s in hyde_srcs],
                 embeddings=embeddings,
             )
             _logger.info(f"DenseStore[hyde] 写入 {len(valid)} 条 → {hyde_collection}")

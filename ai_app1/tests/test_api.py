@@ -173,11 +173,13 @@ def build_test_container(stream_chunks: list[str] | None = None) -> RAGContainer
 
 @pytest.fixture
 def client():
-    """返回带注入容器的同步测试客户端（无需 patch）。"""
+    """返回带注入容器的同步测试客户端（ lifespan 后覆盖为 mock）。"""
     from ai_app1.main import app
 
-    app.state.container = build_test_container()
     with TestClient(app, raise_server_exceptions=True) as c:
+        # lifespan startup 执行完后，重新注入 mock 容器，避免真实模型加载
+        app.state.container = build_test_container()
+        app.state.containers = {"default": app.state.container}
         yield c
 
 
@@ -207,13 +209,14 @@ def test_chat_stream_content(client):
     from ai_app1.main import app
 
     chunks = ["Hello", " Android", " dev!"]
+    # 替换为自定义 mock 容器
     app.state.container = build_test_container(chunks)
+    app.state.containers = {"default": app.state.container}
 
-    with TestClient(app) as c:
-        r = c.post(
-            "/chat",
-            json={"message": "hello", "user_id": "u1"},
-        )
+    r = client.post(
+        "/chat",
+        json={"message": "hello", "user_id": "u1"},
+    )
     assert r.status_code == 200
     for chunk in chunks:
         assert chunk in r.text
