@@ -416,11 +416,14 @@ class HybridRetriever(Retriever):
     async def _legacy_retrieve(self, query: str) -> RetrievalResult:
         """旧版单路检索回退（无 child/hyde collection 时）。"""
         collections = self._domain.get_collection_names()
+        where = None
+        if self._domain_filter:
+            where = {"domain": {"$eq": self._domain_filter}}
         try:
             hit_ids, distances, _ = await asyncio.wait_for(
                 asyncio.to_thread(
                     self._dense.query,
-                    query, collections.parent, 5, 1.2,
+                    query, collections.parent, 5, 1.2, where,
                 ),
                 timeout=self._cfg.branch_timeout,
             )

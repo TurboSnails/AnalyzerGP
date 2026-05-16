@@ -103,7 +103,7 @@ class LLMQueryRewriter(QueryRewriter):
             finally:
                 loop.close()
 
-        return self._executor.submit(_target).result(timeout=15)
+        return self._executor.submit(_target).result(timeout=45)
 
 
 # ─── 工厂函数与自注册 ──────────────────────────────────────────
