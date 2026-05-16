@@ -83,6 +83,9 @@ class RAGContainer:
 
         自动初始化日志、通过工厂注册表创建各组件。
         若传入了 _domain_override 则跳过自动发现（用于测试）。
+
+        子类（如 CS4Container）可直接调用 super().from_settings(settings)，
+        返回的实例类型为子类，无需 object.__new__ hack。
         """
         settings = settings or RAGSettings()
         setup_logging(level=settings.log_level)

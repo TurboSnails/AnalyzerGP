@@ -3,6 +3,10 @@ RAG Framework 统一配置（Pydantic Settings）
 
 集中管理所有环境变量，提供类型校验、默认值、自动解析。
 支持 .env 文件热重载（运行时修改需重启进程）。
+
+跨项目复用注意：
+  - 模型路径默认指向 "./models/*"，可通过环境变量 RAG_*_PATH 覆盖
+  - 不再硬编码任何特定仓库的路径结构
 """
 from __future__ import annotations
 
@@ -12,23 +16,39 @@ from pathlib import Path
 from typing import Literal
 
 from dotenv import load_dotenv
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-# 将传统 .env 文件加载进 os.environ，保证 os.getenv("OPENAI_API_KEY") 等兼容逻辑可用
-for _env_file in (".env", "ai_app1/.env"):
-    if Path(_env_file).exists():
-        load_dotenv(_env_file, override=False)
+
+# ─── 项目根目录推断（与仓库结构解耦）────────────────────────────────────────────
+
+_REPO_ROOT: Path | None = None
 
 
-# ─── 环境文件预加载（兼容旧 OPENAI_API_KEY） ───────────────────────────────────
+def _discover_repo_root() -> Path:
+    """
+    推断项目根目录。
 
-_repo_root = Path(__file__).parent.parent.parent.parent  # 项目根目录
-for _env_file in (_repo_root / ".env", _repo_root / "ai_app1" / ".env"):
-    if _env_file.exists():
-        load_dotenv(_env_file, override=False)
+    策略：沿当前文件向上查找包含 pyproject.toml 的目录。
+    若 rag_framework 以 site-packages 安装（无 pyproject.toml），
+    则返回当前工作目录（cwd），由调用方通过环境变量覆盖路径。
+    """
+    current = Path(__file__).resolve()
+    for parent in current.parents:
+        if (parent / "pyproject.toml").is_file():
+            return parent
+    # 兜底：当前工作目录，适用于独立安装场景
+    return Path.cwd()
 
-# ─── 模型路径解析（原 config.py 中提取） ────────────────────────────────────────
+
+def _get_repo_root() -> Path:
+    global _REPO_ROOT
+    if _REPO_ROOT is None:
+        _REPO_ROOT = _discover_repo_root()
+    return _REPO_ROOT
+
+
+# ─── 模型路径解析（原 config.py 中提取）─────────────────────────────────────────
 
 def _resolve_weights_dir(*candidates: Path) -> Path | None:
     """返回第一个包含 pytorch_model.bin 或 model.safetensors 的目录。"""
@@ -44,89 +64,58 @@ def _resolve_weights_dir(*candidates: Path) -> Path | None:
     return None
 
 
-def _default_repo_root() -> Path:
-    """推断仓库根目录。
-
-    当 rag_framework 以 editable 或 site-packages 安装时均可正确推断。
-    策略：沿 __file__ 向上查找包含 pyproject.toml 的目录；
-          若该目录同时包含 ai_app1/ 子目录则确认为根目录，
-          否则继续向上查找更大的根目录。
-    """
-    current = Path(__file__).resolve()
-    for parent in current.parents:
-        if (parent / "pyproject.toml").is_file():
-            if (parent / "ai_app1").is_dir():
-                return parent
-            # 当前目录有 pyproject.toml 但无 ai_app1（如 rag_framework 子包），
-            # 继续向上查找包含 ai_app1 的更大根目录
-            for grandparent in parent.parents:
-                if (grandparent / "pyproject.toml").is_file() and (grandparent / "ai_app1").is_dir():
-                    return grandparent
-            return parent
-    # 兜底：传统相对路径（开发模式）
-    return current.parent.parent.parent.parent
-
-
 def _resolve_bge_m3_path() -> str:
-    repo = _default_repo_root()
-    for base in (repo, repo / "ai_app1"):
-        candidate = base / "models" / "bge-m3"
-        if found := _resolve_weights_dir(candidate):
-            return str(found)
-    return str(repo / "models" / "bge-m3")
+    repo = _get_repo_root()
+    candidate = repo / "models" / "bge-m3"
+    if found := _resolve_weights_dir(candidate):
+        return str(found)
+    # 兼容 HuggingFace Hub 自动下载
+    return "BAAI/bge-m3"
 
 
 def _resolve_reranker_path() -> str:
-    repo = _default_repo_root()
-    for base in (repo, repo / "ai_app1"):
-        candidate = base / "models" / "bge-reranker-base"
-        if found := _resolve_weights_dir(candidate):
-            return str(found)
+    repo = _get_repo_root()
+    candidate = repo / "models" / "bge-reranker-base"
+    if found := _resolve_weights_dir(candidate):
+        return str(found)
+    # 兼容 HuggingFace Hub 自动下载
     return "BAAI/bge-reranker-base"
 
 
 def _resolve_rewriter_path() -> str:
-    repo = _default_repo_root()
-    for base in (repo, repo / "ai_app1"):
-        candidate = base / "models" / "qwen2.5-1.5b-instruct"
-        if found := _resolve_weights_dir(candidate):
-            return str(found)
+    repo = _get_repo_root()
+    candidate = repo / "models" / "qwen2.5-1.5b-instruct"
+    if found := _resolve_weights_dir(candidate):
+        return str(found)
+    # 兼容 HuggingFace Hub 自动下载
     return "Qwen/Qwen2.5-1.5B-Instruct"
 
 
 def _resolve_llm_local_path() -> str:
     """返回本地 LLM 模型路径（优先查找已下载的 qwen2.5-1.5b-instruct）。"""
-    repo = _default_repo_root()
-    for base in (repo, repo / "ai_app1"):
-        candidate = base / "models" / "qwen2.5-1.5b-instruct"
-        if found := _resolve_weights_dir(candidate):
-            return str(found)
+    repo = _get_repo_root()
+    candidate = repo / "models" / "qwen2.5-1.5b-instruct"
+    if found := _resolve_weights_dir(candidate):
+        return str(found)
     return str(repo / "models" / "qwen2.5-1.5b-instruct")
 
 
 def _default_chroma_path() -> str:
-    repo = _default_repo_root()
-    # 优先使用已存在的 ai_app1/data/chroma_db
-    legacy = repo / "ai_app1" / "data" / "chroma_db"
-    if legacy.exists():
-        return str(legacy)
-    return str(repo / "pre" / "chroma_db")
+    return str(_get_repo_root() / "data" / "chroma_db")
 
 
 def _default_bm25_path() -> str:
-    return str(Path(_default_chroma_path()).parent / "tantivy_bm25")
+    return str(_get_repo_root() / "data" / "tantivy_bm25")
 
 
 def _default_llamaindex_path() -> str:
     """默认 LlamaIndex 持久化目录。"""
-    repo = _default_repo_root()
-    return str(repo / "pre" / "llamaindex")
+    return str(_get_repo_root() / "data" / "llamaindex")
 
 
 def _default_torch_cache_path() -> str:
     """默认 PyTorch 模型缓存目录。"""
-    repo = _default_repo_root()
-    return str(repo / "models" / "torch_cache")
+    return str(_get_repo_root() / "models" / "torch_cache")
 
 
 # ─── 主配置类 ───────────────────────────────────────────────────────────────────
@@ -140,7 +129,7 @@ class RAGSettings(BaseSettings):
     """
 
     model_config = SettingsConfigDict(
-        env_file=[".env", "ai_app1/.env"],
+        env_file=[".env"],
         env_file_encoding="utf-8",
         env_prefix="RAG_",
         extra="ignore",  # 忽略未知环境变量，兼容旧配置

@@ -669,7 +669,6 @@ dependencies = [
     { name = "accelerate" },
     { name = "android-domain" },
     { name = "anthropic" },
-    { name = "asyncpg" },
     { name = "chromadb" },
     { name = "datasets" },
     { name = "export" },
@@ -679,22 +678,17 @@ dependencies = [
     { name = "jieba" },
     { name = "langchain-openai" },
     { name = "langgraph" },
-    { name = "llama-index-core" },
     { name = "msmarco-domain" },
     { name = "numpy" },
     { name = "openai" },
     { name = "pandas" },
     { name = "pydantic" },
     { name = "python-dotenv" },
-    { name = "rag-framework" },
-    { name = "redis" },
+    { name = "rag-framework", extra = ["all"] },
     { name = "sentence-transformers" },
-    { name = "sqlalchemy" },
     { name = "tantivy" },
     { name = "tokenizers" },
     { name = "tools" },
-    { name = "torch" },
-    { name = "transformers" },
     { name = "uvicorn" },
 ]
 
@@ -710,7 +704,6 @@ requires-dist = [
     { name = "accelerate", specifier = ">=1.13.0" },
     { name = "android-domain", editable = "domains/android" },
     { name = "anthropic", specifier = ">=0.97.0" },
-    { name = "asyncpg", specifier = ">=0.30.0" },
     { name = "chromadb", specifier = ">=1.5.9" },
     { name = "datasets", specifier = ">=2.0.0" },
     { name = "export", specifier = ">=0.2.1" },
@@ -720,22 +713,17 @@ requires-dist = [
     { name = "jieba", specifier = ">=0.42.1" },
     { name = "langchain-openai", specifier = ">=0.3.0" },
     { name = "langgraph", specifier = ">=0.4.0" },
-    { name = "llama-index-core", specifier = ">=0.12.0" },
     { name = "msmarco-domain", editable = "domains/msmarco" },
     { name = "numpy", specifier = ">=2.4.4" },
     { name = "openai", specifier = ">=2.34.0" },
     { name = "pandas", specifier = ">=3.0.2" },
     { name = "pydantic", specifier = ">=2.13.3" },
     { name = "python-dotenv", specifier = ">=1.0.0" },
-    { name = "rag-framework", editable = "rag_framework" },
-    { name = "redis", specifier = ">=5.2.0" },
+    { name = "rag-framework", extras = ["all"], editable = "rag_framework" },
     { name = "sentence-transformers", specifier = ">=3.0.0" },
-    { name = "sqlalchemy", specifier = ">=2.0.0" },
     { name = "tantivy", specifier = ">=0.26.0" },
     { name = "tokenizers", specifier = ">=0.22.0,<=0.23.0" },
     { name = "tools", specifier = ">=1.0.27" },
-    { name = "torch", specifier = ">=2.5.0" },
-    { name = "transformers", specifier = ">=4.46.0" },
     { name = "uvicorn", specifier = ">=0.34.0" },
 ]
 
@@ -2811,17 +2799,40 @@ dependencies = [
     { name = "tantivy" },
 ]
 
+[package.optional-dependencies]
+all = [
+    { name = "asyncpg" },
+    { name = "llama-index-core" },
+    { name = "redis" },
+    { name = "sqlalchemy" },
+    { name = "torch" },
+    { name = "transformers" },
+]
+
 [package.metadata]
 requires-dist = [
+    { name = "asyncpg", marker = "extra == 'all'", specifier = ">=0.30.0" },
+    { name = "asyncpg", marker = "extra == 'persistence'", specifier = ">=0.30.0" },
     { name = "chromadb", specifier = ">=0.5" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "jieba", specifier = ">=0.42" },
+    { name = "llama-index-core", marker = "extra == 'all'", specifier = ">=0.12.0" },
+    { name = "llama-index-core", marker = "extra == 'llamaindex'", specifier = ">=0.12.0" },
     { name = "openai", specifier = ">=1.0" },
     { name = "pydantic", specifier = ">=2.0" },
     { name = "pydantic-settings", specifier = ">=2.0" },
+    { name = "redis", marker = "extra == 'all'", specifier = ">=5.2.0" },
+    { name = "redis", marker = "extra == 'persistence'", specifier = ">=5.2.0" },
     { name = "sentence-transformers", specifier = ">=3.0" },
+    { name = "sqlalchemy", marker = "extra == 'all'", specifier = ">=2.0.0" },
+    { name = "sqlalchemy", marker = "extra == 'persistence'", specifier = ">=2.0.0" },
     { name = "tantivy", specifier = ">=0.21" },
+    { name = "torch", marker = "extra == 'all'", specifier = ">=2.5.0" },
+    { name = "torch", marker = "extra == 'torch'", specifier = ">=2.5.0" },
+    { name = "transformers", marker = "extra == 'all'", specifier = ">=4.46.0" },
+    { name = "transformers", marker = "extra == 'torch'", specifier = ">=4.46.0" },
 ]
+provides-extras = ["llamaindex", "torch", "persistence", "all"]
 
 [package.metadata.requires-dev]
 dev = [
