@@ -73,3 +73,5 @@ rag_framework/pre/
 rag_framework/pre/chroma_db/
 rag_framework/pre/tantivy_bm25/
 /ai_app1/data/msmarco_bm25/
+/domains/android/scripts/ai_app1/
+/domains/msmarco/

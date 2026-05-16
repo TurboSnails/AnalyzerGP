@@ -190,6 +190,65 @@ class RAGSettings(BaseSettings):
             return backend
         return ""
 
+    # ── Rewriter LLM（查询改写专用，默认复用主 LLM）─────────────────────────────
+    rewriter_llm_backend: str = ""
+    rewriter_llm_model: str = ""
+    rewriter_llm_base_url: str = ""
+    rewriter_llm_api_key: str = ""
+    rewriter_llm_max_tokens: int = 128
+    rewriter_llm_local_model_path: str = Field(default_factory=_resolve_llm_local_path)
+
+    @field_validator("rewriter_llm_base_url", mode="after")
+    @classmethod
+    def _resolve_rewriter_llm_base_url(cls, v: str, info) -> str:
+        if v:
+            return v
+        backend = info.data.get("rewriter_llm_backend", "")
+        if not backend:
+            # 默认复用主 LLM 配置
+            backend = info.data.get("llm_backend", "local")
+        presets = {
+            "minimax": "https://api.minimaxi.com/v1",
+            "ollama": "http://127.0.0.1:11434/v1",
+            "openai": "https://api.openai.com/v1",
+            "local": "",
+        }
+        return presets.get(backend, presets["minimax"])
+
+    @field_validator("rewriter_llm_model", mode="after")
+    @classmethod
+    def _resolve_rewriter_llm_model(cls, v: str, info) -> str:
+        if v:
+            return v
+        backend = info.data.get("rewriter_llm_backend", "")
+        if not backend:
+            backend = info.data.get("llm_backend", "local")
+        presets = {
+            "minimax": "MiniMax-M2.7",
+            "ollama": "qwen2.5:1.5b-instruct-q4_K_M",
+            "openai": "gpt-4o-mini",
+            "local": "qwen2.5-1.5b-instruct",
+        }
+        return presets.get(backend, presets["minimax"])
+
+    @field_validator("rewriter_llm_api_key", mode="after")
+    @classmethod
+    def _resolve_rewriter_llm_api_key(cls, v: str, info) -> str:
+        if v:
+            return v
+        backend = info.data.get("rewriter_llm_backend", "")
+        if not backend:
+            backend = info.data.get("llm_backend", "local")
+        if backend in ("ollama", "local"):
+            return backend
+        # 复用主 LLM API Key
+        return info.data.get("llm_api_key") or info.data.get("openai_api_key") or ""
+
+    @property
+    def resolved_rewriter_llm_backend(self) -> str:
+        """返回有效的 rewriter LLM backend（fallback 到主 LLM）。"""
+        return self.rewriter_llm_backend or self.llm_backend
+
     # ── Embedding ────────────────────────────────────────────────────────────
     embed_model_path: str = Field(default_factory=_resolve_bge_m3_path)
     embed_device: str = "auto"

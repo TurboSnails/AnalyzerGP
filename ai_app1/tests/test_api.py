@@ -166,6 +166,7 @@ def build_test_container(stream_chunks: list[str] | None = None) -> RAGContainer
         retriever=FakeRetriever(),
         reranker=FakeReranker(),
         llm=llm,
+        rewriter_llm=llm,
         session_store=FakeSessionStore(),
         domain=FakeDomain(),
     )

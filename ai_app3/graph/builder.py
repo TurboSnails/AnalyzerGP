@@ -11,20 +11,20 @@ Agentic RAG StateGraph 构建器。
                      │
                      └──→ direct_response ───────────────────────────────┐
                                                                        │
-  generate: build_messages ──→ llm ──→ self_check ──→ save_reply ──────┤
+   generate: build_messages ──→ llm ──→ self_check ──→ save_reply ──────┤
                                                                        │
-  save_reply ──→ should_summarize? ──┬──→ summarize ──→ trim ──→ END
+   save_reply ──→ should_summarize? ──┬──→ summarize ──→ trim ──→ END
                                      └──→ trim ──→ END
 """
 from __future__ import annotations
 
 import re
 
-from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import StateGraph, END
 
-from ai_app3.core.config import OPENAI_API_KEY, DEFAULT_TOKEN_BUDGET, SYSTEM_PROMPT
+from ai_app3.core.config import DEFAULT_TOKEN_BUDGET, SYSTEM_PROMPT
+from ai_app3.core.llm_provider import get_chat_llm
 from ai_app3.core.logger import graph_logger
 from ai_app3.graph.state import RagState
 from ai_app3.graph.nodes import (
@@ -44,25 +44,14 @@ from ai_app3.graph.nodes import (
 )
 from ai_app3.graph.conditional_edges import after_intent, after_evaluate
 
-if not OPENAI_API_KEY:
-    graph_logger.warning("OPENAI_API_KEY 未设置，LLM 调用将会失败")
-
-# ── LLM 实例（复用 MiniMax 兼容端点，绑定工具）───────────────────────────────
-_llm = ChatOpenAI(
-    model="MiniMax-M2.7",
-    base_url="https://api.minimaxi.com/v1",
-    api_key=OPENAI_API_KEY or "",
-    temperature=0.3,
-).bind_tools([
-    # 只绑定 search_docs 和 evaluate_answer，multiply 作为示例保留在 TOOLS 中但不绑定给 LLM
-    # 实际 bind_tools 会传入全部工具；这里为了简洁直接传入全部
-])
+# ── LLM 实例（主 LLM，用于对话/生成/摘要）───────────────────────────────
+_base_llm = get_chat_llm(temperature=0.3)
 
 # 为了让 builder.py 不依赖 TOOLS 的循环导入，我们在 tools.py 里已定义。
 # 但 _llm 实际在节点内部通过参数传入，这里先不 bind（因为 llm_node 内部使用 TOOL_MAP 手工执行）
 # 注意：ai_app2 使用 bind_tools；ai_app3 继续使用 bind_tools 让 LLM 知道工具定义
 from ai_app3.service.tools import TOOLS
-_llm = _llm.bind_tools(TOOLS)
+_llm = _base_llm.bind_tools(TOOLS)
 
 
 # ── 包装异步节点 ──────────────────────────────────────────────────────────

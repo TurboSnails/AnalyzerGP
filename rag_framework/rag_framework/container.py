@@ -61,6 +61,7 @@ class RAGContainer:
     retriever: Retriever
     reranker: Reranker
     llm: LLMClient
+    rewriter_llm: LLMClient
     session_store: SessionStore
     domain: DomainPlugin
     rule_rewriter: QueryRewriter | None = field(default=None, compare=False)
@@ -97,7 +98,7 @@ class RAGContainer:
             embedder=embedder,
         )
 
-        # ── 3. LLM ──
+        # ── 3. LLM（主 LLM，用于对话/生成/摘要） ──
         llm_kwargs = {
             "base_url": settings.llm_base_url,
             "api_key": settings.resolved_llm_api_key,
@@ -111,6 +112,23 @@ class RAGContainer:
         llm = llm_registry.create(
             settings.llm_backend,
             **llm_kwargs,
+        )
+
+        # ── 3.5 Rewriter LLM（查询改写专用，默认复用主 LLM 配置） ──
+        rewriter_backend = settings.resolved_rewriter_llm_backend
+        rewriter_llm_kwargs = {
+            "base_url": settings.rewriter_llm_base_url,
+            "api_key": settings.rewriter_llm_api_key,
+            "model": settings.rewriter_llm_model,
+            "backend": rewriter_backend,
+            "max_tokens": settings.rewriter_llm_max_tokens,
+            "max_concurrent": settings.llm_max_concurrent,
+        }
+        if rewriter_backend == "local":
+            rewriter_llm_kwargs["model_path"] = settings.rewriter_llm_local_model_path
+        rewriter_llm = llm_registry.create(
+            rewriter_backend,
+            **rewriter_llm_kwargs,
         )
 
         # ── 4. Reranker ──
@@ -172,7 +190,7 @@ class RAGContainer:
         llm_rewriter = None
         if rewriter_registry.is_registered("llm"):
             try:
-                llm_rewriter = rewriter_registry.create("llm", llm=llm)
+                llm_rewriter = rewriter_registry.create("llm", llm=rewriter_llm)
             except Exception:
                 pass
 
@@ -194,6 +212,7 @@ class RAGContainer:
             retriever=retriever,
             reranker=reranker,
             llm=llm,
+            rewriter_llm=rewriter_llm,
             session_store=session_store,
             domain=domain,
             rule_rewriter=rule_rewriter,
@@ -252,7 +271,7 @@ class RAGContainer:
     def warmup_targets(self) -> list[Warmupable]:
         """返回所有支持预热的组件（供 lifespan 统一调用）。"""
         targets: list[Warmupable] = []
-        for comp in (self.embedder, self.reranker, self.vector_store, self.llm):
+        for comp in (self.embedder, self.reranker, self.vector_store, self.llm, self.rewriter_llm):
             if isinstance(comp, Warmupable):
                 targets.append(comp)
         return targets

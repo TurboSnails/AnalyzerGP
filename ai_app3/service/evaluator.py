@@ -11,18 +11,13 @@ import json
 import re
 from typing import Any
 
-from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage, HumanMessage
 
-from ai_app3.core.config import OPENAI_API_KEY, RETRIEVAL_CONFIDENCE_THRESHOLD
+from ai_app3.core.config import RETRIEVAL_CONFIDENCE_THRESHOLD
+from ai_app3.core.llm_provider import get_chat_llm
 from ai_app3.core.logger import eval_logger
 
-_llm = ChatOpenAI(
-    model="MiniMax-M2.7",
-    base_url="https://api.minimaxi.com/v1",
-    api_key=OPENAI_API_KEY or "",
-    temperature=0.1,
-)
+_llm = get_chat_llm(temperature=0.1)
 
 
 def evaluate_retrieval(query: str, context: str | None) -> dict:

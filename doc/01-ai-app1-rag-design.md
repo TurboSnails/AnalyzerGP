@@ -1,12 +1,14 @@
 # ai_app1 - 多领域 RAG 问答系统设计文档
 
-> 版本: 3.4 | 最后更新: 2026-05-16
+> 版本: 3.5 | 最后更新: 2026-05-16
 
 ---
 
 ## 1. 系统定位
 
 ai_app1 是一个支持 **多领域** 的 **智能问答助手**，基于 RAG (Retrieval-Augmented Generation) 架构构建。系统可同时加载多个 DomainPlugin（如 Android 开发、MS MARCO 通用英文问答等），通过统一的知识库 collection + `domain` 元数据过滤实现领域隔离，为本地 Qwen2.5 或远程 MiniMax-M2.7 等大模型提供精准上下文。
+
+**v3.5 核心变化**：改写与生成 LLM 解耦 — `RAGSettings` 新增独立的 `rewriter_llm_*` 配置组，`RAGContainer` 同时持有 `llm`（主生成模型，默认远程 MiniMax）与 `rewriter_llm`（改写专用模型，默认本地 Qwen），改写器（`LLMQueryRewriter`）与最终对话流使用不同 LLM 实例。`ai_app3` 引入 `llm_provider.py` 统一接管 LangChain `ChatOpenAI` 创建，消除全部硬编码模型名与 API Key。
 
 **v3.4 核心变化**：统一 Collection 架构 — 所有领域数据写入同一个 `knowledge_base` collection，通过 `domain` metadata 字段实现领域隔离检索，无需为每个领域维护独立 collection 和 BM25 索引。新增多领域容器并发加载、自动路由（中文→android，英文→默认）、跨领域融合（`domain: "all"`）能力。
 
@@ -103,7 +105,8 @@ class RAGContainer:
     vector_store:    VectorStore           # ChromaDB（统一抽象接口）
     retriever:       Retriever             # HybridRetriever（多路召回 + RRF）
     reranker:        Reranker              # CrossEncoderReranker 语义精排
-    llm:             LLMClient             # OpenAILLMClient / LocalLLMClient
+    llm:             LLMClient             # 主生成 LLM（默认远程 MiniMax）
+    rewriter_llm:    LLMClient             # 改写专用 LLM（默认本地 Qwen）
     session_store:   SessionStore          # MemorySessionStore
     domain:          DomainPlugin          # Android 领域插件
     rule_rewriter:   QueryRewriter | None  # L1 规则改写器
@@ -111,10 +114,19 @@ class RAGContainer:
 
     @classmethod
     def from_settings(cls, settings: RAGSettings | None = None) -> "RAGContainer":
-        # 1. 通过 embedder_registry.create("sentence_transformer", ...) 创建组件
-        # 2. 通过 vector_store_registry.create("chroma", ...) 创建向量库
-        # 3. 通过 llm_registry.create("local" | "openai" | "minimax", ...) 创建 LLM
-        # ... 所有组件均通过注册表创建，无硬编码 new
+        # 1. 创建主 LLM（用于最终对话生成 / summarize）
+        llm = llm_registry.create(settings.llm_backend, ...)
+        # 2. 创建 rewriter_llm（用于查询改写；可独立配置 backend/model/base_url）
+        rewriter_llm = llm_registry.create(
+            settings.resolved_rewriter_llm_backend,
+            base_url=settings.rewriter_llm_base_url,
+            api_key=settings.rewriter_llm_api_key,
+            model=settings.rewriter_llm_model,
+            ...
+        )
+        # 3. 改写器显式注入 rewriter_llm，而非主 llm
+        llm_rewriter = rewriter_registry.create("llm", llm=rewriter_llm)
+        # ... 其余组件均通过注册表创建，无硬编码 new
         ...
 
     async def chat_stream(self, query: str, user_id: str):
@@ -154,12 +166,18 @@ async def chat(req: ChatRequest, container: RAGContainer = Depends(get_container
 
 | 配置项 | 默认值 | 说明 |
 |--------|--------|------|
-| `llm_backend` | `"local"` | 支持 `local` / `minimax` / `openai` / `ollama` |
+| `llm_backend` | `"local"` | 主 LLM 后端，支持 `local` / `minimax` / `openai` / `ollama` |
 | `llm_base_url` | 按 backend 预设 | `local` 为空串；minimax / openai / ollama 自动填充 |
 | `llm_model` | 按 backend 预设 | local: `qwen2.5-1.5b-instruct`；minimax: `MiniMax-M2.7` |
 | `llm_api_key` | 回退链解析 | 配置值 → `OPENAI_API_KEY` 环境变量 → backend 默认 |
-| `llm_max_tokens` | `512` | LLM 最大生成 token 数 |
+| `llm_max_tokens` | `512` | 主 LLM 最大生成 token 数 |
 | `llm_max_concurrent` | `3` | LLM 并发请求限制 |
+| `rewriter_llm_backend` | `""`（空） | 改写专用 LLM 后端；**空则自动回退到 `llm_backend`** |
+| `rewriter_llm_base_url` | `""` | 改写 LLM base_url；空则回退到 `llm_base_url` |
+| `rewriter_llm_model` | `""` | 改写 LLM 模型名；空则回退到 `llm_model` |
+| `rewriter_llm_api_key` | `""` | 改写 LLM API Key；空则回退到 `llm_api_key` |
+| `rewriter_llm_max_tokens` | `128` | 改写 LLM 最大生成 token 数（rewrite 场景通常只需短输出） |
+| `rewriter_llm_local_model_path` | `""` | 本地改写模型路径；空则回退到 `llm_local_model_path` |
 | `embed_backend` | `"sentence_transformer"` | 通过工厂注册表选择 embedder 实现 |
 | `vector_store_backend` | `"chroma"` | 通过工厂注册表选择向量库实现 |
 | `reranker_backend` | `"cross_encoder"` | 通过工厂注册表选择 reranker 实现 |
@@ -170,6 +188,8 @@ async def chat(req: ChatRequest, container: RAGContainer = Depends(get_container
 | `embed_model_path` | 动态解析 | `models/bge-m3/` 含权重目录 |
 | `reranker_model_path` | 动态解析 | 本地 `models/bge-reranker-base/` 或 HF Hub |
 | `llm_local_model_path` | 动态解析 | `models/qwen2.5-1.5b-instruct/` |
+
+> **v3.5 配置回退机制**：所有 `rewriter_llm_*` 字段若留空（或仅含空白字符），`RAGSettings` 的 `field_validator` 会自动将其解析为对应主 `llm_*` 的值；`resolved_rewriter_llm_backend` 属性在 `rewriter_llm_backend` 为空时返回 `llm_backend`。这意味着**不填 rewriter 配置 = 完全兼容旧行为**，升级零成本。
 
 配置加载顺序：`.env` → `ai_app1/.env`（`override=False`，不覆盖已有环境变量）。
 
@@ -451,18 +471,31 @@ domain   : TEXT, stored, tokenizer=raw        # 领域标记（"android"/"msmarc
 - 输出：`[original(1.0)] + [semantic(0.90, 0.80)]`
 - 日志：`INFO` 级打印 model 路径、query、耗时、扩写结果
 
-**LLMQueryRewriter**（`retrieval/query_rewriter/llm_rewriter.py`）— 远程 fallback：
-- 仅当 `rewriter_backend=auto` 且本地模型路径不存在时启用（调用 MiniMax 远程 API）
+**LLMQueryRewriter**（`retrieval/query_rewriter/llm_rewriter.py`）— 通过 `LLMClient` 接口改写：
+- 注入 `rewriter_llm`（而非主 `llm`），可独立配置为本地或远程
 - 独立线程+事件循环，15 秒超时，失败降级为原始 query
 - 输出：`[original(1.0)] + [semantic(0.90, 0.80, 0.70)]`
+- **v3.5 变化**：`RAGContainer` 创建时显式传入 `rewriter_llm`，实现改写与生成模型解耦
 
-**rewriter_backend 选择逻辑**（`container.py`）：
+**QwenQueryRewriter**（`retrieval/query_rewriter/qwen_rewriter.py`）— 本地独立改写器：
+- 直接加载本地 transformers 模型，不经过 `LLMClient` 抽象层
+- 当 `rewriter_llm_backend=local` 且本地模型路径存在时，优先于 `LLMQueryRewriter` 使用
+- 与 `rewriter_llm` 配置互不影响，属于框架级独立实现
+
+**rewriter 选择逻辑**（`container.py`）：
 
 ```python
-if backend == "local" or (backend == "auto" and Path(model_path).is_dir()):
+# v3.5：双 LLM 实例创建
+llm = llm_registry.create(settings.llm_backend, ...)           # 主生成 LLM
+rewriter_llm = llm_registry.create(
+    settings.resolved_rewriter_llm_backend, ...
+)                                                              # 改写专用 LLM
+
+# L2 改写器：优先本地 Qwen（独立 transformers），其次 LLMQueryRewriter（注入 rewriter_llm）
+if rewriter_backend == "local" and Path(model_path).is_dir():
     llm_rewriter = QwenQueryRewriter(model_path, max_new_tokens)
 else:
-    llm_rewriter = LLMQueryRewriter(llm=minimax_llm)  # 远程 fallback
+    llm_rewriter = rewriter_registry.create("llm", llm=rewriter_llm)
 ```
 
 **QueryRoute 元数据：**
@@ -588,7 +621,7 @@ tokens      = int(cn_chars * 1.5 + other_chars * 0.5)
 
 ### 3.8 LLM 客户端
 
-框架支持两种 LLM 客户端，通过 `llm_backend` 配置切换：
+框架支持两种 LLM 客户端，通过 `llm_backend` / `rewriter_llm_backend` 独立配置切换：
 
 #### OpenAILLMClient（`rag_framework/llm/openai_client.py`）
 
@@ -638,6 +671,12 @@ llm = llm_registry.create("local",
     max_concurrent=3,
 )
 ```
+
+**v3.5 双 LLM 实例**：`RAGContainer.from_settings()` 现在同时创建 `llm` 与 `rewriter_llm` 两个实例：
+- `llm` — 用于最终对话生成、`summarize`、工具调用循环（默认远程 MiniMax，追求质量）
+- `rewriter_llm` — 用于 `LLMQueryRewriter` 查询改写（默认本地 Qwen，追求低成本+低延迟）
+- 两者通过完全独立的配置组管理，共享 `llm_max_concurrent` 并发限制
+- `warmup_targets()` 同时包含两个实例，lifespan 启动时并行预热
 
 ---
 
@@ -1239,12 +1278,14 @@ curl -X POST http://localhost:8000/chat \
 | **统一 Collection** | 所有领域写入 `knowledge_base`，`domain` metadata 隔离 | 无需为每个领域维护独立 collection 和 BM25 索引；ChromaDB `where` + Tantivy boolean query 实现运行时过滤；新增领域零索引脚本改动 |
 | Embedding | BGE-M3 (本地 STEmbedder) | 中文语义效果优、L2 normalize、显式编码便于缓存和换模型 |
 | 向量库 | ChromaDB | 本地持久化、零配置、Python 原生 |
-| LLM | MiniMax-M2.7（默认） | 中文能力强、OpenAI 格式兼容 |
+| LLM（生成） | MiniMax-M2.7（默认） | 中文能力强、OpenAI 格式兼容；承担最终对话与 summarize |
+| LLM（改写） | Qwen2.5-1.5B-Instruct（默认本地） | 改写任务轻量，本地运行零 API 成本、低延迟；与生成模型解耦避免远程配额浪费 |
 | 检索架构 | 三路并发混合检索 | Dense 精度 + HyDE 覆盖 + BM25 关键词，三路互补；ThreadPoolExecutor 并发 ~90ms |
 | 父子回溯 | child 检索 → parent 上下文 | 细粒度匹配提升精度，大粒度 parent 保证上下文连贯性 |
 | BM25 引擎 | Tantivy (Rust) + jieba | mmap 磁盘索引内存占用小；Rust BM25 ~10× Python；jieba 分词精度高 |
 | 查询扩写 | 三级路由 L0/L1/L2 | 80% 简单 query 不需 LLM；规则路由 1ms 分流，平均耗时大幅降低 |
-| L2 改写器 | 本地 Qwen2.5-1.5B-Instruct | 避免 L2 改写消耗远程 API 配额；~800ms（MPS）vs ~1500ms（远端）；rewriter_backend=auto 自动选择，本地模型不存在时降级 MiniMax |
+| L2 改写器 | 本地 Qwen2.5-1.5B-Instruct | 避免 L2 改写消耗远程 API 配额；~800ms（MPS）vs ~1500ms（远端）；rewriter_backend=auto 自动选择，本地模型不存在时降级 LLMQueryRewriter |
+| 改写/生成模型分离 | `rewriter_llm_*` 独立配置组 + `RAGContainer` 双实例 | 改写走轻量本地模型，生成走远程大模型；独立配置、独立预热、独立回退；不影响原有单 LLM 使用方式 |
 | Reranker | CrossEncoder (bge-reranker-base) | 语义相关性打分优于规则线性；sigmoid 归一化后与 RRF 同区间；FallbackReranker 作降级 |
 | 低置信度兜底 | ce_score 阈值 0.30 | 复用 reranker 输出无额外开销；明确拒答比基于不相关片段硬答更有价值 |
 | 索引编排 | VectorIndexer 统一管道 | 消除 init 脚本与框架的重复逻辑（chunking/HyDE/batch 写入），300 行 → 130 行 |
@@ -1308,6 +1349,7 @@ curl -X POST http://localhost:8000/chat \
 
 | 版本 | 日期 | 变更内容 |
 |------|------|----------|
+| **v3.5** | **2026-05-16** | **改写与生成 LLM 解耦**：`RAGSettings` 新增 `rewriter_llm_backend` / `rewriter_llm_model` / `rewriter_llm_base_url` / `rewriter_llm_api_key` / `rewriter_llm_max_tokens` / `rewriter_llm_local_model_path` 配置组，留空自动回退到主 `llm_*`；`RAGContainer` 新增 `rewriter_llm` 字段，`from_settings()` 同时创建主 `llm` 与 `rewriter_llm` 两个实例；`LLMQueryRewriter` 注入 `rewriter_llm` 而非主 `llm`；`warmup_targets()` 同时预热两个实例；`ai_app3/core/llm_provider.py` 统一接管 LangChain `ChatOpenAI` 创建，消除 `query_engine.py` / `evaluator.py` / `context_compressor.py` / `graph/builder.py` 四处硬编码 `ChatOpenAI(model="MiniMax-M2.7", ...)`；`ai_app1/.env.example` 补充 rewriter_llm 配置模板；`verify_refactor.py` 增加 rewriter_llm 配置类型检查 |
 | **v3.4** | **2026-05-16** | **统一 Collection 多领域架构**：所有领域数据写入 `knowledge_base` collection，`domain` metadata 隔离；`ChromaVectorStore.query()` 支持 `where` 过滤；`BM25Store` schema 新增 `domain` 字段，search/add 支持 domain 过滤；`HybridRetriever` 接受 `domain_filter` 并传递至 dense/BM25；工厂注册表透传 `domain_filter`；`AndroidDomainPlugin` / `MSMarcoDomainPlugin` 统一返回 `knowledge_base` 前缀集合名；`VectorIndexer` / `init_vector_db_v2` / `download_and_index` 自动写入 `domain` metadata；`ai_app1/main.py` 多领域并发加载：共享 embedder/vector_store/llm/reranker/bm25，独立 session_store/retriever（`replace()` 派生 + 对象 id 去重预热）；`ai_app1/api/chat.py` 支持 `domain="all"` 跨领域融合与自动路由（中文→android）；`test_api.py` fixture 在 lifespan 后注入 mock 容器 |
 | v3.3 | 2026-05-15 | **评测与可观测性体系**：`query_classifier.py` 自动分类 + 按类型统计 recall；`rewrite_eval.py` before/after 量化对比；`rerank_eval.py` CrossEncoder win/loss/hold 验证；`retrieval_trace.py` 检索全链路 Trace（已嵌入 `HybridRetriever`）；`latency_breakdown.py` PhaseTimer + 瓶颈自动识别；`failure_analysis.py` 失败样本收集 + JSON Lines 存储（已嵌入 `SessionManager`）；`comprehensive_eval.py` 一站式评测调度器；`eval/__init__.py` 统一导出 |
 | v3.1 | 2026-05-13 | **本地 Qwen 改写器**：新增 `QwenQueryRewriter`（Qwen2.5-1.5B-Instruct，懒加载，线程安全）；`container.py` 按 `rewriter_backend` 自动选择本地/远程改写器；`SessionManager._build_routes()` 加 Rewrite level 日志；`LLMQueryRewriter` / `RuleQueryRewriter` 加 model + 耗时 INFO 日志 |

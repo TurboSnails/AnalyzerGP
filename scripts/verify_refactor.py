@@ -105,7 +105,13 @@ def check_config_types() -> bool:
         assert isinstance(s.active_domain, str)
         assert isinstance(s.llm_backend, str)
         assert isinstance(s.embed_model_path, str)
-        print("  [PASS] RAGSettings 类型正确")
+        # rewriter_llm 配置组
+        assert isinstance(s.rewriter_llm_backend, str)
+        assert isinstance(s.resolved_rewriter_llm_backend, str)
+        # 若 rewriter_llm_backend 为空则回退到 llm_backend；若已显式设置则允许不同
+        if not s.rewriter_llm_backend.strip():
+            assert s.resolved_rewriter_llm_backend == s.llm_backend
+        print("  [PASS] RAGSettings 类型正确（含 rewriter_llm）")
         return True
     except Exception as e:
         print(f"  [FAIL] RAGSettings 检查失败: {e}")
@@ -184,6 +190,11 @@ def main() -> int:
         "ai_app1/main.py",
         "ai_app1/api/chat.py",
         "ai_app1/tests/test_api.py",
+        "ai_app3/core/llm_provider.py",
+        "ai_app3/service/query_engine.py",
+        "ai_app3/service/evaluator.py",
+        "ai_app3/service/context_compressor.py",
+        "ai_app3/graph/builder.py",
     ]
 
     results = [

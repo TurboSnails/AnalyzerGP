@@ -13,23 +13,17 @@ import json
 import re
 from typing import Any
 
-from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage, HumanMessage
 
 from ai_app3.core.config import (
-    OPENAI_API_KEY,
     MAX_SUB_QUERIES,
     SUB_QUERY_MIN_CONFIDENCE,
 )
+from ai_app3.core.llm_provider import get_rewriter_llm
 from ai_app3.core.logger import retrieve_logger
 
 
-_llm = ChatOpenAI(
-    model="MiniMax-M2.7",
-    base_url="https://api.minimaxi.com/v1",
-    api_key=OPENAI_API_KEY or "",
-    temperature=0.2,
-)
+_llm = get_rewriter_llm(temperature=0.2)
 
 
 def intent_analysis(query: str) -> dict:
