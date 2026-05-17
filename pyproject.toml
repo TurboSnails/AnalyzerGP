@@ -24,6 +24,7 @@ dependencies = [
     "jieba>=0.42.1",
     "rag-framework[all]",
     "android-domain",
+    "wealth-domain",
     "msmarco-domain",
     "datasets>=2.0.0",
     "accelerate>=1.13.0",
@@ -33,6 +34,7 @@ dependencies = [
 [tool.uv.sources]
 rag-framework = { path = "rag_framework", editable = true }
 android-domain = { path = "domains/android", editable = true }
+wealth-domain = { path = "domains/wealth", editable = true }
 msmarco-domain = { path = "domains/msmarco", editable = true }
 
 [dependency-groups]

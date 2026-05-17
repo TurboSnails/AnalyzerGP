@@ -1,0 +1,14 @@
+[project]
+name = "wealth-domain"
+version = "0.1.0"
+description = "全球资产与宏观经济投资分析领域插件"
+requires-python = ">=3.11"
+dependencies = [
+    "rag-framework",
+]
+
+[tool.uv.sources]
+rag-framework = { path = "../../rag_framework", editable = true }
+
+[tool.setuptools.packages.find]
+include = ["wealth_domain*"]

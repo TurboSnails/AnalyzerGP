@@ -70,6 +70,8 @@ rag_framework/build/
 rag_framework/*.egg-info/
 domains/android/build/
 domains/android/*.egg-info/
+domains/wealth/build/
+domains/wealth/*.egg-info/
 /ai_app1/data/msmarco_bm25/
 
 # 误路径 / 旧脚本产生的运行时索引（勿提交）

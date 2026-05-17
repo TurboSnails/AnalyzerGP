@@ -1,7 +1,7 @@
 """
-ai_app4 — 商业化客服系统 FastAPI 入口（端口 8004）。
+ai_app4 — Wealth AI Agent v4.0 FastAPI 入口（端口 8004）。
 
-基于 LangGraph + LlamaIndex + PyTorch 的第三代 RAG 客服系统。
+基于 LangGraph 的全球资产与宏观经济多步推演智能助理。
 """
 from pathlib import Path
 
@@ -13,8 +13,8 @@ from ai_app4.api.chat import router as chat_router
 from ai_app4.lifespan import lifespan
 
 app = FastAPI(
-    title="ai_app4 — 商业化客服系统",
-    description="基于 LangGraph + LlamaIndex + PyTorch 的智能客服系统",
+    title="ai_app4 — Wealth AI Agent",
+    description="基于 LangGraph 的全球资产与宏观经济多步推演智能助理",
     version="0.1.0",
     lifespan=lifespan,
 )
@@ -28,7 +28,7 @@ if _static.is_dir():
 
 @app.get("/")
 def root():
-    return {"message": "ai_app4 客服系统已启动", "docs": "/docs"}
+    return {"message": "Wealth AI Agent v4.0 已启动", "docs": "/docs"}
 
 
 @app.get("/health")
