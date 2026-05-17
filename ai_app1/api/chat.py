@@ -153,7 +153,7 @@ async def chat(req: ChatRequest, request: Request):
     containers: dict[str, RAGContainer] = getattr(
         request.app.state, "containers", {}
     ) or {}
-    default_container: RAGContainer = getattr(
+    default_container: RAGContainer | None = getattr(
         request.app.state, "container", None
     )
 
