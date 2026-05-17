@@ -29,14 +29,18 @@ def _discover_repo_root() -> Path:
     """
     推断项目根目录。
 
-    策略：沿当前文件向上查找包含 pyproject.toml 的目录。
+    策略：沿当前文件向上查找包含 pyproject.toml 的目录，
+    并继续向上直到找到最顶层的 pyproject.toml（避免子包目录）。
     若 rag_framework 以 site-packages 安装（无 pyproject.toml），
     则返回当前工作目录（cwd），由调用方通过环境变量覆盖路径。
     """
     current = Path(__file__).resolve()
+    found: Path | None = None
     for parent in current.parents:
         if (parent / "pyproject.toml").is_file():
-            return parent
+            found = parent
+    if found is not None:
+        return found
     # 兜底：当前工作目录，适用于独立安装场景
     return Path.cwd()
 
@@ -101,16 +105,18 @@ def _resolve_llm_local_path() -> str:
 
 
 def _default_chroma_path() -> str:
-    return str(_get_repo_root() / "data" / "chroma_db")
+    """默认 ChromaDB 向量库路径：ai_app1/data/chroma_db。"""
+    return str(_get_repo_root() / "ai_app1" / "data" / "chroma_db")
 
 
 def _default_bm25_path() -> str:
-    return str(_get_repo_root() / "data" / "tantivy_bm25")
+    """默认 Tantivy BM25 稀疏索引路径：ai_app1/data/tantivy_bm25。"""
+    return str(_get_repo_root() / "ai_app1" / "data" / "tantivy_bm25")
 
 
 def _default_llamaindex_path() -> str:
     """默认 LlamaIndex 持久化目录。"""
-    return str(_get_repo_root() / "data" / "llamaindex")
+    return str(_get_repo_root() / "ai_app1" / "data" / "llamaindex")
 
 
 def _default_torch_cache_path() -> str:

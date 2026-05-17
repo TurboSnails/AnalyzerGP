@@ -17,7 +17,7 @@ echo "[setup] 正在安装依赖 (uv sync)..."
 uv sync
 
 # ── 3. 复制 .env 模板（已存在则跳过）───────────────────────────
-for app in ai_app1 ai_app2 ai_app3; do
+for app in ai_app1 ai_app2 ai_app3 ai_app4; do
     example="$ROOT/$app/.env.example"
     target="$ROOT/$app/.env"
     if [ -f "$example" ] && [ ! -f "$target" ]; then
@@ -28,6 +28,13 @@ for app in ai_app1 ai_app2 ai_app3; do
     fi
 done
 
+# ── 4. 创建数据目录（如不存在）─────────────────────────────────
+mkdir -p "$ROOT/ai_app1/data"
+mkdir -p "$ROOT/models"
+
 echo ""
 echo "✓ 环境初始化完成"
-echo "  下一步：编辑 ai_app1/.env，填入你的 OPENAI_API_KEY"
+echo "  下一步："
+echo "    1. 编辑 ai_app1/.env，填入你的 OPENAI_API_KEY"
+echo "    2. 运行模型下载脚本（见 PROJECT_LAYOUT.md）"
+echo "    3. 运行索引构建脚本（见 PROJECT_LAYOUT.md）"

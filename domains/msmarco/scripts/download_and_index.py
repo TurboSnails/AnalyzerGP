@@ -10,8 +10,12 @@
 
 用法：
   cd fenxiCB
-  DOMAIN=msmarco RAG_BM25_INDEX_DIR=ai_app1/data/msmarco_bm25 \\
-      uv run python domains/msmarco/scripts/download_and_index.py
+  uv run python domains/msmarco/scripts/download_and_index.py
+
+注意：
+  - ai_app1 运行时所有领域共用同一个 BM25 索引目录（由 RAG_BM25_INDEX_DIR 决定）。
+  - 默认目录为 ai_app1/data/tantivy_bm25，与 android 领域索引共存，通过 domain 元数据隔离。
+  - 无需手动覆盖 RAG_BM25_INDEX_DIR，保持与 android 一致即可。
 
 可选参数：
   --reset       清空现有向量库后重建

@@ -65,6 +65,7 @@ def _check_memory(label: str = "") -> bool:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Android 知识库初始化 v2")
+    # 默认从 ai_app1/data 读取源文档，与 RAGSettings 默认路径保持一致
     parser.add_argument(
         "--data-dir",
         default=str(_ROOT / "ai_app1" / "data"),

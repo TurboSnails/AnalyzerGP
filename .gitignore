@@ -53,26 +53,26 @@ env/
 secrets/
 
 # ─── Data / Models / Indexes (project-specific) ─────────────────
+# 本地模型权重（体积大，不提交）
 /models/
-/ai_app1/models/
+
+# 向量数据库 + BM25 索引（运行时生成，不提交）
 /ai_app1/data/chroma_db/
 /ai_app1/data/tantivy_bm25/
-/ai_app1/pre/chroma_db/
-/ai_app1/pre/tantivy_bm25/
+/ai_app1/data/llamaindex/
+
+# 评测报告
+/reports/
 /ai_app1/eval/reports/
-/ai_app1/test/models/
 
 # ─── Local package build artifacts ──────────────────────────────
 rag_framework/build/
 rag_framework/*.egg-info/
 domains/android/build/
 domains/android/*.egg-info/
-pre/chroma_db/
-pre/tantivy_bm25/
-rag_framework/pre/
-rag_framework/pre/chroma_db/
-rag_framework/pre/tantivy_bm25/
 /ai_app1/data/msmarco_bm25/
+
+# 误路径 / 旧脚本产生的运行时索引（勿提交）
 /domains/android/scripts/ai_app1/
-/domains/msmarco/
-/ai_app1/data/msmarco_chroma/
+/rag_framework/data/
+/domains/msmarco/domains/

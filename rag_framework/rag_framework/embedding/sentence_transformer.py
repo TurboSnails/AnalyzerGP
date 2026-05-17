@@ -48,19 +48,22 @@ class STEmbedder(Embedder, Warmupable):
     def _ensure_model(self) -> None:
         if self._model is not None:
             return
-        if not os.path.isdir(self._path):
+        # 支持本地路径和 HuggingFace Hub model_id 两种形式
+        if os.path.isdir(self._path) or "/" in self._path:
+            # 本地路径 或 HuggingFace Hub ID（如 "BAAI/bge-m3"）
+            embed_logger.info(f"正在加载 Embedding 模型: {self._path}")
+            try:
+                resolved_device = _resolve_device(self._device)
+                self._model = SentenceTransformer(self._path, device=resolved_device)
+            except Exception as e:
+                raise ModelLoadError(f"加载模型失败: {self._path} — {e}") from e
+            embed_logger.info("Embedding 模型加载完成")
+        else:
             raise ModelNotFoundError(
-                f"模型目录不存在: {self._path}\n"
+                f"模型路径无效（非本地目录且非有效的 HuggingFace ID）: {self._path}\n"
                 "请先下载模型，例如:\n"
-                "  uv run python scripts/download_bge_m3.py --preset bge-m3"
+                "  uv run python -m ai_app1.scripts.download_bge_m3"
             )
-        embed_logger.info(f"正在加载 Embedding 模型: {self._path}")
-        try:
-            resolved_device = _resolve_device(self._device)
-            self._model = SentenceTransformer(self._path, device=resolved_device)
-        except Exception as e:
-            raise ModelLoadError(f"加载模型失败: {e}") from e
-        embed_logger.info("Embedding 模型加载完成")
 
     @property
     def embedding_dim(self) -> int:

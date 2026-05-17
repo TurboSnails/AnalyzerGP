@@ -33,12 +33,19 @@ class LLMQueryRewriter(QueryRewriter):
     def __init__(self, llm: LLMClient, max_tokens: int = 128) -> None:
         self._llm = llm
         self._max_tokens = max_tokens
+        # 本地 CPU 模式推理极慢，直接跳过改写以避免阻塞后续检索
+        self._skip_rewrite = getattr(llm, "backend", None) == "local"
+        self._timeout = 5.0 if self._skip_rewrite else 45.0
         self._executor = ThreadPoolExecutor(
             max_workers=1,
             thread_name_prefix="llm_rewriter",
         )
 
     def rewrite(self, query: str, history: list[dict]) -> list[QueryRoute]:
+        if self._skip_rewrite:
+            _logger.info(f"本地 LLM 模式，跳过 LLM 改写: {query!r}")
+            return [QueryRoute(text=query, type="original", weight=1.0)]
+
         model = self._llm.model
         _logger.info(f"LLM 改写开始: model={model!r}, query={query!r}")
         t0 = time.monotonic()

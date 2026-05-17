@@ -183,8 +183,8 @@ async def chat(req: ChatRequest, container: RAGContainer = Depends(get_container
 | `reranker_backend` | `"cross_encoder"` | 通过工厂注册表选择 reranker 实现 |
 | `retriever_backend` | `"hybrid"` | 通过工厂注册表选择检索器实现 |
 | `session_store_backend` | `"memory"` | 通过工厂注册表选择会话存储实现 |
-| `chroma_db_path` | 动态解析 | 优先 `ai_app1/data/chroma_db`，否则 `pre/chroma_db` |
-| `bm25_path` | 依 chroma 父目录 | `<chroma_parent>/tantivy_bm25/` |
+| `chroma_db_path` | 动态解析 | `ai_app1/data/chroma_db`（默认），可通过 `RAG_CHROMA_DB_PATH` 覆盖 |
+| `bm25_index_dir` | 动态解析 | `ai_app1/data/tantivy_bm25`（默认），可通过 `RAG_BM25_INDEX_DIR` 覆盖 |
 | `embed_model_path` | 动态解析 | `models/bge-m3/` 含权重目录 |
 | `reranker_model_path` | 动态解析 | 本地 `models/bge-reranker-base/` 或 HF Hub |
 | `llm_local_model_path` | 动态解析 | `models/qwen2.5-1.5b-instruct/` |
@@ -1232,6 +1232,8 @@ uv run python -m domains.msmarco.scripts.download_and_index
 # 4. 启动服务（自动预热所有模型）
 uv run python -m uvicorn ai_app1.main:app --host 0.0.0.0 --port 8000
 ```
+
+> 完整的模型/索引/数据目录规范见 [`PROJECT_LAYOUT.md`](../PROJECT_LAYOUT.md)。
 
 ### 6.2 开发调试
 

@@ -147,7 +147,9 @@ class SessionManager:
 
         # 1. 分级 rewrite + classify → 多路 QueryRoute
         t_rewrite_start = time.perf_counter()
-        routes = self._build_routes(req_msg, session.history)
+        # rewrite 可能包含本地 LLM 同步推理，需卸载到线程池避免阻塞 event loop
+        import asyncio
+        routes = await asyncio.to_thread(self._build_routes, req_msg, session.history)
         t_rewrite = (time.perf_counter() - t_rewrite_start) * 1000
         session_logger.info(f"检索路由: routes={[r.type for r in routes]}")
 

@@ -82,7 +82,7 @@ fenxiCB/
 ├── ai_app1/                    # 传统 RAG 应用层
 │   ├── main.py                 # FastAPI + lifespan（注册插件 → 创建容器 → 预热 → 关闭）
 │   ├── api/chat.py             # /chat POST 路由，StreamingResponse 流式返回
-│   ├── data/                   # 源知识文档 + chroma_db/ + tantivy_bm25/
+│   ├── data/                   # ⭐ 源知识文档 + chroma_db/ + tantivy_bm25/（项目统一数据目录）
 │   ├── scripts/                # 模型下载辅助脚本
 │   ├── static/index.html       # 暗色主题 Web 聊天测试页
 │   ├── tests/test_api.py       # API 端到端测试（Mock 容器，7 个用例）
@@ -106,10 +106,10 @@ fenxiCB/
 │   ├── static/index.html       # 带 Agentic Trace 侧边栏的聊天页
 │   └── .env.example
 │
-├── models/                     # 本地模型权重（gitignored，运行时下载）
-│   ├── bge-m3/
-│   ├── bge-reranker-base/
-│   └── qwen2.5-1.5b-instruct/
+├── models/                     # ⭐ 本地模型权重（gitignored，运行时下载）
+│   ├── bge-m3/                 #   Embedding 模型
+│   ├── bge-reranker-base/      #   Reranker 模型
+│   └── qwen2.5-1.5b-instruct/  #   本地 LLM / Query Rewriter
 │
 └── scripts/
     └── verify_refactor.py      # 重构验证脚本（语法检查 + 导入检查 + 配置类型检查 + 领域插件检查）
@@ -261,7 +261,7 @@ uv run python -m rag_framework.eval.comprehensive_eval rerank
 
 - 统一使用 `RAGSettings`（Pydantic `BaseSettings`），环境变量前缀为 `RAG_`。
 - 配置加载顺序：`.env` → `ai_app1/.env`（`override=False`，不覆盖已有环境变量）。
-- 路径解析为动态计算（如优先 `ai_app1/data/chroma_db`，否则 `pre/chroma_db`），不硬编码绝对路径。
+- 路径默认值统一指向 `ai_app1/data/*` 与 `models/*`，不硬编码绝对路径，详见 `PROJECT_LAYOUT.md`。
 
 ---
 
@@ -313,6 +313,7 @@ uv run python -m rag_framework.eval.comprehensive_eval rerank
 | 忘记构建索引 | 新克隆的仓库 `ai_app1/data/chroma_db/` 为空，必须先运行 `init_vector_db_v2.py` |
 | 未设置 API Key | `.env` 中 `OPENAI_API_KEY` 或 `RAG_LLM_API_KEY` 未填会导致 LLM 调用失败 |
 | 模型路径不存在 | 本地模式依赖 `models/` 下的权重，需先运行 download 脚本或手动放置 |
+| 路径不一致 | 不同同事环境路径混乱时，检查 `PROJECT_LAYOUT.md`，删除 `.env` 中手动覆盖的路径变量 |
 | 并发预热遗漏 | 新增 `Warmupable` 组件后，确保 `RAGContainer.warmup_targets()` 能发现它 |
 | 自注册遗漏 | 新增 embedder / retriever / llm 实现后，确保模块被 `__init__.py` 或 `main.py` 导入以触发 `register_xxx()` |
 
