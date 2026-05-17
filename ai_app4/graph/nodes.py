@@ -60,6 +60,85 @@ def _add_trace(state: WealthState, node: str, detail: dict) -> list[dict]:
 # 启发式连接词：检测到这些词时尝试拆分跨域子查询
 _SPLIT_MARKERS = ("和", "与", "以及", "同时", "结合", "影响", "对比", "vs", "VS")
 
+# 时效性关键词：检测到这些词时标记查询为时间敏感，需要启用 Track B/C
+_TIME_SENSITIVE_MARKERS = (
+    "今天", "今日", "现在", "当前", "最新", "实时", "即时",
+    "刚才", "刚刚", "最近", "近日", "本周", "本月", "今年",
+    "今早", "今晚", "昨天", "昨日", "明日", "明天",
+    "开盘", "收盘", "盘中", "盘后", "盘前",
+    "跌了多少", "涨了多少", "多少点", "多少钱", "什么价",
+    "now", "today", "current", "latest", "real-time", "live",
+)
+
+# NER 模式：用于从查询中提取金融实体
+_TICKER_PATTERN = r"\b[A-Z]{1,5}\b"  # 大写股票代码（如 NVDA, TSLA）
+_DATE_PATTERN = r"(\d{4}[-/]\d{1,2}[-/]\d{1,2}|\d{4}年\d{1,2}月\d{1,2}日|\d{1,2}月\d{1,2}日)"
+_MACRO_PATTERN = r"(CPI|PPI|GDP|PMI|非农|失业率|利率|国债|通胀|通缩)"
+
+
+def _is_time_sensitive(text: str) -> bool:
+    """检测查询是否包含时效性关键词。"""
+    lower = text.lower()
+    return any(marker in text or marker in lower for marker in _TIME_SENSITIVE_MARKERS)
+
+
+def _extract_entities(text: str) -> list[dict]:
+    """
+    从查询文本中提取金融相关实体（NER）。
+
+    返回格式: [{"type": "ticker", "value": "NVDA", "confidence": 0.95}, ...]
+    """
+    import re
+    entities: list[dict] = []
+    seen: set[str] = set()
+
+    # 1. 股票代码（大写 1-5 字母，过滤常见非 ticker 词）
+    non_tickers = {"USD", "CNY", "HKD", "ETF", "IPO", "CEO", "CFO", "CTO", "USA", "USB"}
+    for match in re.finditer(_TICKER_PATTERN, text):
+        ticker = match.group()
+        if ticker not in non_tickers:
+            key = f"ticker:{ticker}"
+            if key not in seen:
+                seen.add(key)
+                entities.append({"type": "ticker", "value": ticker, "confidence": 0.95})
+
+    # 2. 宏观指标
+    for match in re.finditer(_MACRO_PATTERN, text):
+        indicator = match.group()
+        key = f"indicator:{indicator}"
+        if key not in seen:
+            seen.add(key)
+            entities.append({"type": "macro_indicator", "value": indicator, "confidence": 0.90})
+
+    # 3. 日期
+    for match in re.finditer(_DATE_PATTERN, text):
+        date_str = match.group()
+        key = f"date:{date_str}"
+        if key not in seen:
+            seen.add(key)
+            entities.append({"type": "date", "value": date_str, "confidence": 0.85})
+
+    # 4. 已知股票中文名映射（扩展 YahooFinanceSource 的映射）
+    _CN_TICKER_MAP = {
+        "英伟达": "NVDA", "nvidia": "NVDA",
+        "特斯拉": "TSLA", "苹果": "AAPL",
+        "微软": "MSFT", "谷歌": "GOOGL",
+        "亚马逊": "AMZN", "meta": "META",
+        "脸书": "META", "amd": "AMD",
+        "英特尔": "INTC", "台积电": "TSM",
+        "阿里巴巴": "BABA", "腾讯": "TCEHY",
+        "拼多多": "PDD", "小米": "XIACY",
+    }
+    lower_text = text.lower()
+    for keyword, ticker in _CN_TICKER_MAP.items():
+        if keyword in lower_text:
+            key = f"ticker:{ticker}"
+            if key not in seen:
+                seen.add(key)
+                entities.append({"type": "ticker", "value": ticker, "confidence": 0.90})
+
+    return entities
+
 
 def _translate_terms(text: str, terms: dict[str, str]) -> str:
     """基于术语映射生成英文查询变体（保留原词追加英文）。"""
@@ -72,17 +151,60 @@ def _translate_terms(text: str, terms: dict[str, str]) -> str:
     return text
 
 
+# ── 商业版辅助：来源标注与合规 ────────────────────────────────────────────────
+
+def _build_source_footer(trace: list[dict]) -> str:
+    """从 trace 中提取检索来源信息，生成数据来源脚注。"""
+    if not trace:
+        return ""
+
+    # 查找 parallel_retrieval 节点的 tracks_used
+    tracks_used: list[str] = []
+    for entry in trace:
+        if entry.get("node") == "parallel_retrieval" and "tracks_used" in entry:
+            tracks_used = entry["tracks_used"]
+            break
+
+    if not tracks_used:
+        return ""
+
+    source_labels: dict[str, str] = {
+        "track_a": "本地知识库",
+        "track_b": "实时金融数据 API",
+        "track_c": "网络搜索",
+    }
+    parts = [source_labels.get(t, t) for t in tracks_used if t in source_labels]
+    if not parts:
+        return ""
+
+    return f"\n\n—\n📎 数据来源：{'、'.join(parts)}"
+
+
+def _append_compliance(reply: str, settings: WealthSettings) -> str:
+    """在回复末尾追加投资免责声明（如启用）。"""
+    if not getattr(settings, "enable_compliance_disclaimer", True):
+        return reply
+
+    disclaimer = (
+        "\n\n⚠️ 免责声明：以上内容仅供参考，不构成任何投资建议。"
+        "金融市场存在风险，过往业绩不代表未来表现。"
+        "投资者应独立判断并自行承担风险。"
+    )
+    return reply + disclaimer
+
+
 async def analyze_and_route_node(state: WealthState) -> dict[str, Any]:
     """
     分析用户输入，拆解为多路子查询。
 
-    阶段二实现：
-      1. 调用 WealthDomainPlugin.classify_query() 识别领域类型
-      2. 对 mixed/宏观/财报做子查询拆分
-      3. 启用 enable_query_translation 时追加英文术语变体
-      4. 返回带 domain 权重的 sub_queries
+    商业级别增强：
+      1. 时效性检测 — 识别"今天"、"实时"、"最新"等关键词，决定是否启用 Track B/C
+      2. NER 实体提取 — 提取股票代码、宏观指标、日期等实体
+      3. 调用 WealthDomainPlugin.classify_query() 识别领域类型
+      4. 对 mixed/宏观/财报做子查询拆分
+      5. 启用 enable_query_translation 时追加英文术语变体
 
-    输出字段：sub_queries, rewritten_queries, trace
+    输出字段：time_sensitive, entities, sub_queries, rewritten_queries, trace
     """
     container = _get_container()
     settings = _get_settings()
@@ -90,8 +212,9 @@ async def analyze_and_route_node(state: WealthState) -> dict[str, Any]:
     trace = list(state.get("trace", []))
     start = time.monotonic()
 
-    sub_queries: list[dict] = []
-    rewritten: list[str] = []
+    # ── 0. 时效性检测 + NER 实体提取 ─────────────────────────────────────────
+    time_sensitive = _is_time_sensitive(text)
+    entities = _extract_entities(text)
 
     # ── 1. 领域分类 ──────────────────────────────────────────────────────────
     domain = container.domain if container.domain else None
@@ -103,6 +226,9 @@ async def analyze_and_route_node(state: WealthState) -> dict[str, Any]:
             trace.append({"node": "analyze_and_route", "classify_error": str(exc)})
 
     # ── 2. 子查询拆分 ────────────────────────────────────────────────────────
+    sub_queries: list[dict] = []
+    rewritten: list[str] = []
+
     if not settings.enable_query_decomposition or route is None:
         sub_queries.append({"text": text, "domain": "all", "weight": 1.0})
         rewritten.append(text)
@@ -137,12 +263,17 @@ async def analyze_and_route_node(state: WealthState) -> dict[str, Any]:
     latency_ms = (time.monotonic() - start) * 1000
     trace.append({
         "node": "analyze_and_route",
+        "time_sensitive": time_sensitive,
+        "entities_count": len(entities),
+        "entities_types": list({e["type"] for e in entities}),
         "sub_queries_count": len(sub_queries),
         "route_type": getattr(route, "type", "unknown") if route else "unknown",
         "latency_ms": round(latency_ms, 1),
     })
 
     return {
+        "time_sensitive": time_sensitive,
+        "entities": entities,
         "sub_queries": sub_queries,
         "rewritten_queries": rewritten,
         "trace": trace,
@@ -157,14 +288,10 @@ async def parallel_retrieval_node(state: WealthState) -> dict[str, Any]:
     """
     执行检索：复用 HybridRetriever（BM25 + Dense + Rerank）。
 
-    阶段二实现：
-      1. 将每个 sub_query（含中英文变体）包装为 QueryRoute
-      2. 多路 QueryRoute 传入 HybridRetriever，由其内部 asyncio.gather 并发召回
-      3. HybridRetriever 的 Weighted RRF 自动融合各路结果
-      4. 截 top_k 拼接为 retrieved_context
-
-    阶段三增强：
-      - 从 HybridRetriever 的全局 trace 中提取真实 top_ce 分数
+    商业版增强（三轨检索）：
+      - 当 three_track_enabled=True 且 ThreeTrackRetriever 已初始化时，
+        优先使用三轨检索器（本地 RAG + 金融 API + 网络搜索）。
+      - 否则回退到原生 HybridRetriever（Track A 本地检索）。
 
     输出字段：retrieved_context, retrieval_iterations, top_ce, trace
     """
@@ -181,6 +308,7 @@ async def parallel_retrieval_node(state: WealthState) -> dict[str, Any]:
         sub_queries = [{"text": state.get("user_message", ""), "domain": "all", "weight": 1.0}]
 
     context_text: str | None = None
+    tracks_used: list[str] = ["track_a"]  # 默认至少使用本地 Track A
 
     # 构造多路 QueryRoute：每个子查询 + 英文变体（如有）
     all_routes: list[QueryRoute] = []
@@ -205,7 +333,52 @@ async def parallel_retrieval_node(state: WealthState) -> dict[str, Any]:
             )
 
     top_ce = 0.0
-    if container.retriever is not None and all_routes:
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # 商业版：三轨检索优先路径
+    # ═══════════════════════════════════════════════════════════════════════
+    three_track = None
+    if getattr(settings, "three_track_enabled", False):
+        try:
+            import ai_app4.core.context as ctx
+            three_track = ctx.get_three_track_retriever()
+        except Exception:
+            three_track = None
+
+    if three_track is not None and all_routes:
+        try:
+            from rag_framework.datasource.base import FetchContext
+
+            fetch_ctx = FetchContext(
+                user_id=state.get("user_id", "anonymous"),
+                session_id=state.get("session_id", ""),
+                time_sensitive=state.get("time_sensitive", False),
+                entities=state.get("entities", []),
+                history=state.get("messages", [])[-6:] if state.get("messages") else [],
+            )
+            result = await three_track.retrieve(
+                all_routes, top_k=settings.retriever_top_k, context=fetch_ctx
+            )
+            if result.docs:
+                context_text = "\n\n".join(
+                    d.text for d in result.docs[:settings.cross_encoder_top_k] if d.text
+                )
+            tracks_used = ["track_a", "track_b", "track_c"]
+            # 三轨检索器内部已做 RRF 融合，trace 信息通过其他方式记录
+            if result.docs:
+                top_ce = max(
+                    (getattr(d, "score", 0.0) or 0.0 for d in result.docs),
+                    default=0.0,
+                )
+        except Exception as exc:
+            trace.append({"node": "parallel_retrieval", "three_track_error": str(exc)})
+            # 三轨失败时回退到本地检索
+            three_track = None
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # 标准路径：本地 HybridRetriever（回退或默认）
+    # ═══════════════════════════════════════════════════════════════════════
+    if three_track is None and container.retriever is not None and all_routes:
         try:
             result = await container.retriever.retrieve(all_routes, top_k=settings.retriever_top_k)
             if result.docs:
@@ -225,7 +398,7 @@ async def parallel_retrieval_node(state: WealthState) -> dict[str, Any]:
                     )
         except Exception as exc:
             trace.append({"node": "parallel_retrieval", "error": str(exc)})
-    else:
+    elif three_track is None:
         trace.append({"node": "parallel_retrieval", "error": "retriever is None or no routes"})
 
     latency_ms = (time.monotonic() - start) * 1000
@@ -235,6 +408,7 @@ async def parallel_retrieval_node(state: WealthState) -> dict[str, Any]:
         "context_len": len(context_text) if context_text else 0,
         "sub_queries": len(sub_queries),
         "routes": len(all_routes),
+        "tracks_used": tracks_used,
         "top_ce": round(top_ce, 4),
         "latency_ms": round(latency_ms, 1),
     })
@@ -659,6 +833,11 @@ async def merge_and_generate_node(state: WealthState) -> dict[str, Any]:
     if final_reply == reply and math_text:
         final_reply = reply + math_text
 
+    # 商业版：来源标注 + 合规免责声明
+    if getattr(settings, "enable_source_attribution", True):
+        final_reply += _build_source_footer(state.get("trace", []))
+    final_reply = _append_compliance(final_reply, settings)
+
     latency_ms = (time.monotonic() - start) * 1000
     trace.append({
         "node": "merge_and_generate",
@@ -682,9 +861,16 @@ async def generate_final_node(state: WealthState) -> dict[str, Any]:
     纯文本最终回复（无需工具时）。
 
     直接复用 strategy_reasoning 已生成的 reply，追加 trace。
+    商业版增强：追加数据来源标注与合规免责声明。
     """
+    settings = _get_settings()
     trace = list(state.get("trace", []))
     reply = state.get("reply", "")
+
+    # 商业版：来源标注 + 合规免责声明
+    if getattr(settings, "enable_source_attribution", True):
+        reply += _build_source_footer(state.get("trace", []))
+    reply = _append_compliance(reply, settings)
 
     trace.append({
         "node": "generate_final",

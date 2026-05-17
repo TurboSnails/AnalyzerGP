@@ -23,7 +23,12 @@ class WealthState(TypedDict):
     user_message: str                    # 本轮用户输入（可能被 reflection 改写）
     user_id: str                         # 用户标识（用于 MemorySaver thread_id）
 
-    # ── 分析与改写（analyze_and_route 节点写入）───────────────────────────────
+    # ── 查询分析（analyze_and_route 节点写入）─────────────────────────────────
+    time_sensitive: bool                 # 是否包含时效性关键词（"今天"、"最新"、"实时"等）
+    entities: list[dict]                 # NER 实体提取结果
+    #   每项格式: {"type": "ticker|macro_indicator|date", "value": "...", "confidence": 0.95}
+
+    # ── 子查询与改写 ─────────────────────────────────────────────────────────
     sub_queries: list[dict]              # 拆解后的子查询列表
     #   每项格式: {"text": "...", "domain": "macro_econ|corp_earnings|all", "weight": 1.0}
     rewritten_queries: list[str]         # 改写后的查询文本列表（用于 reflection 循环）

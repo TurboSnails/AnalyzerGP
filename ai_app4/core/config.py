@@ -57,6 +57,23 @@ class WealthSettings(RAGSettings):
     max_history_per_session: int = 20            # 单会话最大消息数
     default_token_budget: int = 4096             # 默认 token 预算
 
+    # ── 外部数据源配置 ───────────────────────────────────────────────────────
+    yahoo_finance_enabled: bool = True           # 是否启用 Yahoo Finance
+    fred_api_enabled: bool = False               # 是否启用 FRED API（需配置 Key）
+    fred_api_key: str = ""                       # FRED API Key
+    tavily_search_enabled: bool = False          # 是否启用 Tavily 搜索
+    tavily_api_key: str = ""                     # Tavily API Key
+    tavily_search_depth: str = "basic"           # Tavilly 搜索深度: basic | advanced
+    tavily_max_results: int = 3                  # Tavily 单次搜索返回结果数
+
+    # ── 融合检索配置 ─────────────────────────────────────────────────────────
+    three_track_enabled: bool = True             # 是否启用三轨融合检索
+    track_a_weight: float = 1.0                  # 本地 RAG 权重
+    track_b_weight: float = 0.95                 # 金融 API 权重
+    track_c_weight: float = 0.85                 # 网络搜索权重
+    enable_source_attribution: bool = True       # 是否在回复中标注数据来源
+    enable_compliance_disclaimer: bool = True    # 是否在回复末尾追加投资免责声明
+
     # ── 可观测性 ─────────────────────────────────────────────────────────────
     enable_trace: bool = True                    # 是否输出全链路 trace
     enable_latency_breakdown: bool = True        # 是否输出 PhaseTimer 延迟拆解
