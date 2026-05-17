@@ -101,9 +101,15 @@ class STEmbedder(Embedder, Warmupable):
             return out
 
     async def warmup(self) -> None:
-        """异步预热：将模型加载卸载到线程池。"""
+        """异步预热：加载模型并执行一次 dummy encode，消除首次推理延迟。"""
         import asyncio
-        await asyncio.to_thread(self._ensure_model)
+
+        def _warm():
+            self._ensure_model()
+            # 触发底层 runtime（MPS/CPU）的首次推理图编译与缓存
+            _ = self.encode(["warmup"])
+
+        await asyncio.to_thread(_warm)
 
 
 # ─── 工厂函数与自注册 ──────────────────────────────────────────

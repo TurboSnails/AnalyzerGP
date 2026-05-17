@@ -275,8 +275,27 @@ class LocalLLMClient(LLMClient, Warmupable):
             thread.join()
 
     async def warmup(self) -> None:
-        """异步预热：加载 tokenizer 和 model。"""
-        await asyncio.to_thread(self._ensure_loaded)
+        """异步预热：加载 tokenizer 和 model，并执行一次 dummy generation。"""
+        import asyncio
+
+        def _warm():
+            self._ensure_loaded()
+            import torch
+
+            text = self._tokenizer.apply_chat_template(
+                [{"role": "user", "content": "warmup"}],
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+            inputs = self._tokenizer([text], return_tensors="pt").to(self._model.device)
+            with torch.no_grad():
+                _ = self._model.generate(
+                    **inputs,
+                    max_new_tokens=1,
+                    do_sample=False,
+                )
+
+        await asyncio.to_thread(_warm)
 
 
 # ─── 工厂函数与自注册 ──────────────────────────────────────────

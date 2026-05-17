@@ -109,9 +109,19 @@ class CrossEncoderReranker(Reranker, Warmupable):
         return ranked
 
     async def warmup(self) -> None:
-        """异步预热：加载 CrossEncoder 模型。"""
+        """异步预热：加载 CrossEncoder 模型并执行一次 dummy predict。"""
         import asyncio
-        await asyncio.to_thread(self._ensure_model)
+
+        def _warm():
+            self._ensure_model()
+            # 预热底层 runtime，避免首次 rerank 的冷启动延迟
+            _ = self._model.predict(  # type: ignore[union-attr]
+                [["warmup query", "warmup document"]],
+                show_progress_bar=False,
+                convert_to_numpy=True,
+            )
+
+        await asyncio.to_thread(_warm)
 
 
 # ─── 工厂函数与自注册 ──────────────────────────────────────────
