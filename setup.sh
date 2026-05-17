@@ -30,11 +30,21 @@ done
 
 # ── 4. 创建数据目录（如不存在）─────────────────────────────────
 mkdir -p "$ROOT/ai_app1/data"
+mkdir -p "$ROOT/ai_app4/data"
+mkdir -p "$ROOT/domains/wealth/data"
 mkdir -p "$ROOT/models"
 
 echo ""
 echo "✓ 环境初始化完成"
-echo "  下一步："
+echo ""
+echo "  通用下一步（ai_app1/2/3）："
 echo "    1. 编辑 ai_app1/.env，填入你的 OPENAI_API_KEY"
 echo "    2. 运行模型下载脚本（见 PROJECT_LAYOUT.md）"
 echo "    3. 运行索引构建脚本（见 PROJECT_LAYOUT.md）"
+echo ""
+echo "  ai_app4 (Wealth AI) 专属下一步："
+echo "    1. 编辑 ai_app4/.env，按需填入 WEALTH_FRED_API_KEY / WEALTH_TAVILY_API_KEY"
+echo "    2. 构建 Wealth 知识库索引："
+echo "       uv run python domains/wealth/scripts/init_wealth_db.py"
+echo "    3. 启动 ai_app4（端口 8004）："
+echo "       uv run python -m uvicorn ai_app4.main:app --host 0.0.0.0 --port 8004"
